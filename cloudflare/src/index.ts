@@ -731,13 +731,50 @@ if [ "\$B" = "Y" ] || [ "\$B" = "y" ]; then
 fi
 
 echo
+# 4) settings.json에 hooks 자동 머지 — Claude Code 재시작만 하면 즉시 추적 시작
+SETTINGS="\$HOME/.claude/settings.json"
+HOOK_FILE="\$PLUGIN_DIR/hooks/hooks.json"
+if command -v node >/dev/null && [ -f "\$HOOK_FILE" ]; then
+  bold "🪝 ~/.claude/settings.json에 hooks 자동 등록..."
+  node -e "
+    const fs = require('fs');
+    const path = require('path');
+    const settingsPath = '\$SETTINGS';
+    const pluginDir = '\$PLUGIN_DIR';
+    const hookFile = '\$HOOK_FILE';
+    let settings = {};
+    try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
+    settings.hooks = settings.hooks || {};
+    const tpl = JSON.parse(fs.readFileSync(hookFile, 'utf8'));
+    // hooks/hooks.json은 \${CLAUDE_PLUGIN_ROOT} 변수를 쓰므로 실제 경로로 치환 + 마커로 식별
+    const TAG = '#claude-tracker';
+    for (const [event, groups] of Object.entries(tpl.hooks || {})) {
+      settings.hooks[event] = settings.hooks[event] || [];
+      // Remove any prior claude-tracker entries (idempotent re-install)
+      settings.hooks[event] = settings.hooks[event].filter(g =>
+        !(g.hooks || []).some(h => (h.command || '').includes(TAG))
+      );
+      for (const g of groups) {
+        const cloned = JSON.parse(JSON.stringify(g));
+        for (const h of (cloned.hooks || [])) {
+          h.command = (h.command || '').replace(/\\\\\\\${CLAUDE_PLUGIN_ROOT}/g, pluginDir) + ' ' + TAG;
+        }
+        settings.hooks[event].push(cloned);
+      }
+    }
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+    console.log('  ✅ hooks 등록 완료 (' + Object.keys(tpl.hooks).length + ' events)');
+  " 2>&1 | tail -3
+fi
+
+echo
 green "🎉 설치 완료"
 echo
-bold "마지막 단계 — Claude Code 안에서 한 번만 실행:"
-echo "  /plugin marketplace add \$PLUGIN_DIR"
-echo "  /plugin install claude-tracker"
+bold "다음 단계:"
+echo "  1. Claude Code를 종료했다가 다시 켜세요 (hook 활성화 위해)"
+echo "  2. 새 대화를 시작하면 자동으로 추적됩니다"
 echo
-echo "그 다음부터는 모든 세션이 자동으로 추적됩니다."
 echo "본인 대시보드: \$BASE/?token=\$TOKEN"
 `;
 

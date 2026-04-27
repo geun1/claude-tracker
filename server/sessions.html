@@ -84,9 +84,7 @@
   .conv .scroll { padding:0; }
   .conv-body { padding:24px 0 80px; max-width:880px; margin:0 auto; }
 
-  /* Day separator */
-  .day-sep { display:flex; justify-content:center; margin:30px 0 20px; }
-  .day-sep span { background:var(--panel-2); color:var(--mute); padding:6px 16px; border-radius:14px; font-size:12px; }
+  /* (legacy day-sep removed — see new rule above) */
 
   /* ── Message blocks ── */
   .msg { padding:0 24px; margin-bottom:28px; }
@@ -100,17 +98,42 @@
   .msg.user { display:flex; flex-direction:column; align-items:flex-end; }
   .msg.user .meta { width:100%; justify-content:flex-end; gap:8px; }
   .msg.user .bubble { background:var(--user-bubble); border:1px solid var(--user-border); border-radius:18px; padding:13px 18px; max-width:78%; }
-  .msg.user .bubble .text { color:var(--fg); font-size:14px; line-height:1.65; white-space:pre-wrap; word-break:break-word; }
 
   /* Assistant message — no box, just text */
   .msg.assistant .bubble { padding:0; max-width:100%; }
-  .msg.assistant .text { color:var(--fg); font-size:14px; line-height:1.7; white-space:pre-wrap; word-break:break-word; }
-  .msg.assistant .text strong { color:#fff; font-weight:600; }
-  .msg.assistant .text em { color:#cbd5e1; font-style:italic; }
-  .msg.assistant .text a { color:#60a5fa; text-decoration:underline; text-underline-offset:2px; }
-  .msg.assistant .text code { background:var(--code-bg); padding:1px 7px; border-radius:5px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:12.5px; color:#f0abfc; border:1px solid var(--line); }
-  .msg.assistant .text pre.codeblock { background:var(--code-bg); border:1px solid var(--line); border-radius:10px; padding:14px 16px; overflow-x:auto; font-family: ui-monospace, monospace; font-size:12.5px; line-height:1.6; color:#cdd9e5; margin:10px 0; white-space:pre; }
-  .msg.assistant h1, .msg.assistant h2, .msg.assistant h3 { font-weight:600; margin:14px 0 8px; }
+
+  /* Rich text rendering (apply to both user/assistant bubbles) */
+  .text { color:var(--fg); font-size:14px; line-height:1.7; word-break:break-word; }
+  .text > *:first-child { margin-top:0; }
+  .text > *:last-child { margin-bottom:0; }
+  .text p { margin:0 0 10px; }
+  .text p:last-child { margin-bottom:0; }
+  .text h3 { font-size:17px; font-weight:600; margin:18px 0 8px; color:#fff; }
+  .text h4 { font-size:15px; font-weight:600; margin:14px 0 6px; color:#fff; }
+  .text h5, .text h6 { font-size:13.5px; font-weight:600; margin:12px 0 6px; color:#fff; }
+  .text strong { color:#fff; font-weight:600; }
+  .text em { color:#cbd5e1; font-style:italic; }
+  .text del { color:#7d8590; }
+  .text a { color:#60a5fa; text-decoration:underline; text-underline-offset:2px; }
+  .text a:hover { color:#93c5fd; }
+  .text code { background:var(--code-bg); padding:1px 6px; border-radius:5px; font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:12.5px; color:#f0abfc; border:1px solid var(--line); }
+  .text pre.codeblock { position:relative; background:var(--code-bg); border:1px solid var(--line); border-radius:10px; padding:14px 16px; overflow-x:auto; font-size:12.5px; line-height:1.6; color:#cdd9e5; margin:12px 0; }
+  .text pre.codeblock code { background:transparent; border:0; padding:0; color:inherit; font-size:inherit; white-space:pre; }
+  .text pre.codeblock[data-lang]::before { content: attr(data-lang); position:absolute; top:8px; right:12px; font-size:10px; color:var(--mute); font-family:ui-monospace,monospace; padding:1px 8px; background:var(--panel); border-radius:6px; }
+  .text ul, .text ol { margin:8px 0 12px; padding-left:24px; }
+  .text ul li, .text ol li { margin:4px 0; }
+  .text ul li::marker { color:var(--mute); }
+  .text ol li::marker { color:var(--mute); }
+  .text blockquote { border-left:3px solid var(--accent); padding:6px 14px; margin:10px 0; background:#1f6feb11; border-radius:0 6px 6px 0; color:#cbd5e1; }
+  .text blockquote p { margin:4px 0; }
+  .text hr { border:0; border-top:1px solid var(--line); margin:16px 0; }
+  .msg.user .text blockquote { border-color:#fff4; background:#fff1; color:var(--fg); }
+
+  /* Day separator with relative label */
+  .day-sep { display:flex; align-items:center; gap:12px; margin:32px 4px 18px; color:var(--mute); font-size:11px; }
+  .day-sep .line { flex:1; border-top:1px solid var(--line); }
+  .day-sep .label { background:var(--panel-2); padding:4px 12px; border-radius:14px; font-size:11.5px; color:var(--fg); border:1px solid var(--line); }
+  .day-sep .rel { color:var(--mute); }
 
   /* Collapsible long content (CCHV "더 보기" pattern) */
   .collapsible { position:relative; max-height:none; }
@@ -142,6 +165,16 @@
   .toolcall .body { padding:14px 16px; border-top:1px solid var(--line); background:var(--panel-2); }
   .toolcall .label { font-size:10.5px; color:var(--mute); text-transform:uppercase; letter-spacing:.08em; margin-bottom:6px; }
   .codeblk { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:12px; background:var(--code-bg); border-radius:8px; padding:12px 14px; overflow-x:auto; margin:0; color:#cdd9e5; line-height:1.6; white-space:pre; border:1px solid var(--line); }
+
+  /* Bash 터미널 카드 */
+  .toolcall.bash { background:#0a0e14; border-color:#1a2229; }
+  .toolcall.bash summary { background:#0d1218; border-bottom:1px solid #1a2229; }
+  .terminal { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:12.5px; line-height:1.55; background:#0a0e14; padding:10px 14px; border-radius:8px; }
+  .term-line { color:#e6edf3; white-space:pre-wrap; word-break:break-all; }
+  .term-line .prompt { color:#3fb950; font-weight:600; margin-right:6px; user-select:none; }
+  .term-line .cmd { color:#cbd5e1; }
+  .term-out { margin-top:8px; padding-top:8px; border-top:1px dashed #1a2229; color:#9ca3af; white-space:pre-wrap; word-break:break-all; max-height:320px; overflow:auto; }
+  .term-out.err { color:#fca5a5; }
   .codeblk.wrap { white-space:pre-wrap; word-break:break-word; }
 
   /* Tool result inline (away_summary style) */
@@ -269,15 +302,66 @@ const fmtDur = (s) => {
 };
 const escapeHtml = (s) => (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 
-function renderMd(s) {
-  if (!s) return "";
-  let t = escapeHtml(s);
-  t = t.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) => `<pre class="codeblock">${code}</pre>`);
-  t = t.replace(/`([^`\n]+)`/g, "<code>$1</code>");
-  t = t.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  t = t.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
-  t = t.replace(/(^|\s)(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
-  return t;
+function renderMd(src) {
+  if (!src) return "";
+  // 1) Extract fenced code blocks first (preserve raw)
+  const fences = [];
+  src = src.replace(/```([\w-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    fences.push({ lang, code });
+    return `\x00FENCE${fences.length - 1}\x00`;
+  });
+
+  function inline(s) {
+    s = escapeHtml(s);
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+    s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+    s = s.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
+    s = s.replace(/(^|\s)(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    return s;
+  }
+
+  const lines = src.split("\n");
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const fm = line.match(/^\x00FENCE(\d+)\x00$/);
+    if (fm) {
+      const f = fences[+fm[1]];
+      out.push(`<pre class="codeblock"${f.lang ? ` data-lang="${escapeHtml(f.lang)}"` : ""}><code>${escapeHtml(f.code)}</code></pre>`);
+      i++; continue;
+    }
+    let m;
+    if (m = line.match(/^(#{1,4})\s+(.+)$/)) { out.push(`<h${m[1].length+2}>${inline(m[2])}</h${m[1].length+2}>`); i++; continue; }
+    if (/^(\*\*\*|---|___)\s*$/.test(line)) { out.push("<hr/>"); i++; continue; }
+    if (/^>\s/.test(line)) {
+      const block = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) { block.push(lines[i].replace(/^>\s?/, "")); i++; }
+      out.push(`<blockquote>${block.map(inline).join("<br/>")}</blockquote>`);
+      continue;
+    }
+    if (/^[-*+]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^[-*+]\s+/.test(lines[i])) { items.push(lines[i].replace(/^[-*+]\s+/, "")); i++; }
+      out.push(`<ul>${items.map(it => `<li>${inline(it)}</li>`).join("")}</ul>`);
+      continue;
+    }
+    if (/^\d+\.\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) { items.push(lines[i].replace(/^\d+\.\s+/, "")); i++; }
+      out.push(`<ol>${items.map(it => `<li>${inline(it)}</li>`).join("")}</ol>`);
+      continue;
+    }
+    if (line.trim() === "") { i++; continue; }
+    const para = [];
+    while (i < lines.length && lines[i].trim() !== "" && !/^(\x00FENCE|#{1,4}\s|>\s|[-*+]\s|\d+\.\s|---\s*$|\*\*\*\s*$|___\s*$)/.test(lines[i])) {
+      para.push(lines[i]); i++;
+    }
+    out.push(`<p>${para.map(inline).join("<br/>")}</p>`);
+  }
+  return out.join("");
 }
 
 let selectedUser = null, selectedSession = null, messages = [], visibleMessages = [];
@@ -444,10 +528,14 @@ async function loadDetail() {
   // Group by day with separators
   let bodyHtml = '<div class="conv-body" id="convBody">';
   let lastDay = null;
+  const todayStr = fmtDay(new Date().toISOString());
+  const yestDate = new Date(); yestDate.setDate(yestDate.getDate() - 1);
+  const yestStr = fmtDay(yestDate.toISOString());
   for (const m of visibleMessages) {
     const day = fmtDay(m.ts);
     if (day !== lastDay) {
-      bodyHtml += `<div class="day-sep"><span>${escapeHtml(fmtDate(m.ts))}</span></div>`;
+      const rel = day === todayStr ? "오늘" : day === yestStr ? "어제" : "";
+      bodyHtml += `<div class="day-sep"><div class="line"></div><span class="label">${escapeHtml(fmtDate(m.ts))}${rel ? ` <span class="rel">· ${rel}</span>` : ""}</span><div class="line"></div></div>`;
       lastDay = day;
     }
     bodyHtml += renderMsg(m);
@@ -501,7 +589,8 @@ async function loadDetail() {
 function shouldCollapse(text) { return text && text.length > 320; }
 
 function renderTextMaybeCollapsed(text, isUser=false) {
-  const html = isUser ? escapeHtml(text) : renderMd(text);
+  // 사용자 메시지도 마크다운 렌더링 (코드 펜스, 링크, 인라인 코드 등은 사용자도 자주 씀)
+  const html = renderMd(text);
   if (!shouldCollapse(text)) return `<div class="text">${html}</div>`;
   return `<div class="text collapsible collapsed">${html}</div><button class="more-btn">▾ 더 보기...</button>`;
 }
@@ -523,15 +612,63 @@ function renderMsg(m) {
     for (const tc of m.tool_calls) {
       const isErr = m.tool_result?.is_error && m.tool_result?.tool_use_id === tc.id;
       const status = isErr ? '<span class="status err">✗ 실패</span>' : '<span class="status">✓ 완료</span>';
-      const inputStr = JSON.stringify(tc.input || {}, null, 2);
-      const cmd = tc.input?.command || tc.input?.file_path || tc.input?.pattern || tc.input?.url || tc.input?.prompt || "";
-      const resultBlock = m.tool_result && m.tool_result.tool_use_id === tc.id
-        ? `<div class="label" style="margin-top:14px">${isErr?'에러':'결과'}</div><pre class="codeblk wrap">${escapeHtml((m.tool_result.output || "").slice(0, 4000))}${(m.tool_result.output||"").length > 4000 ? "\n\n…[잘림]" : ""}</pre>`
+      const cmd = tc.input?.command || tc.input?.file_path || tc.input?.pattern || tc.input?.url || tc.input?.prompt || tc.input?.path || "";
+      const resultRaw = (m.tool_result && m.tool_result.tool_use_id === tc.id) ? (m.tool_result.output || "") : null;
+      const resultBlock = resultRaw != null
+        ? `<div class="label" style="margin-top:14px">${isErr?'에러':'결과'}</div><pre class="codeblk wrap">${escapeHtml(resultRaw.slice(0, 4000))}${resultRaw.length > 4000 ? "\n\n…[" + (resultRaw.length - 4000) + " 더보기 잘림]" : ""}</pre>`
         : "";
-      const icon = tc.name === "Bash" ? "›_" : "🔧";
+
+      // Bash: 터미널 스타일 (명령어 + 결과를 한눈에)
+      if (tc.name === "Bash") {
+        const description = tc.input?.description || "";
+        inner += `
+          <details class="toolcall bash" open>
+            <summary><span class="ic">›_ 터미널</span>${description ? `<span class="preview">${escapeHtml(description)}</span>` : `<span class="preview"><code style="background:transparent;color:var(--mute);font-size:11px">${escapeHtml(String(cmd).slice(0, 140))}</code></span>`}${status}</summary>
+            <div class="body">
+              <div class="terminal">
+                <div class="term-line"><span class="prompt">$</span> <span class="cmd">${escapeHtml(String(cmd))}</span></div>
+                ${resultRaw != null ? `<div class="term-out${isErr?' err':''}">${escapeHtml(resultRaw.slice(0, 4000))}${resultRaw.length > 4000 ? `\n…[${resultRaw.length - 4000} chars 잘림]` : ""}</div>` : ""}
+              </div>
+            </div>
+          </details>`;
+        continue;
+      }
+
+      // Edit: file_path + old/new
+      if (tc.name === "Edit" || tc.name === "MultiEdit") {
+        const file = tc.input?.file_path || "";
+        inner += `
+          <details class="toolcall">
+            <summary><span class="ic">✏️ ${escapeHtml(tc.name)}</span><span class="preview">${escapeHtml(file)}</span>${status}</summary>
+            <div class="body">
+              ${tc.input?.old_string ? `<div class="label">변경 전</div><pre class="codeblk wrap" style="border-left:3px solid var(--err)">${escapeHtml(String(tc.input.old_string).slice(0, 2000))}</pre>` : ""}
+              ${tc.input?.new_string ? `<div class="label" style="margin-top:10px">변경 후</div><pre class="codeblk wrap" style="border-left:3px solid var(--asst)">${escapeHtml(String(tc.input.new_string).slice(0, 2000))}</pre>` : ""}
+              ${resultBlock}
+            </div>
+          </details>`;
+        continue;
+      }
+
+      // Read / Glob / Grep: file 경로 강조
+      if (tc.name === "Read" || tc.name === "Glob" || tc.name === "Grep" || tc.name === "Write") {
+        const file = tc.input?.file_path || tc.input?.path || tc.input?.pattern || "";
+        const icon = tc.name === "Read" ? "📖" : tc.name === "Write" ? "✍️" : tc.name === "Grep" ? "🔍" : "📁";
+        inner += `
+          <details class="toolcall">
+            <summary><span class="ic">${icon} ${escapeHtml(tc.name)}</span><span class="preview"><code style="background:transparent;color:var(--mute);font-size:11px">${escapeHtml(file)}</code></span>${status}</summary>
+            <div class="body">
+              ${tc.input?.content ? `<div class="label">내용</div><pre class="codeblk wrap">${escapeHtml(String(tc.input.content).slice(0, 2000))}</pre>` : ""}
+              ${resultBlock}
+            </div>
+          </details>`;
+        continue;
+      }
+
+      // 기본
+      const inputStr = JSON.stringify(tc.input || {}, null, 2);
       inner += `
         <details class="toolcall">
-          <summary><span class="ic">${icon} ${escapeHtml(tc.name === "Bash" ? "터미널" : tc.name)}</span><span class="preview">${escapeHtml(String(cmd).slice(0, 200))}</span>${status}</summary>
+          <summary><span class="ic">🔧 ${escapeHtml(tc.name)}</span><span class="preview">${escapeHtml(String(cmd).slice(0, 200))}</span>${status}</summary>
           <div class="body">
             <div class="label">입력</div>
             <pre class="codeblk wrap">${escapeHtml(inputStr.slice(0, 2000))}</pre>
