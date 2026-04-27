@@ -16,31 +16,27 @@
 - 대시보드: same / `/`
 - 세션 뷰어: same / `/browse`
 
-## 동료 설치 (5분)
-
-관리자에게 본인 토큰을 받은 후:
+## 동료 설치 (3분, 한 줄)
 
 ```bash
-# 1) 플러그인 설치
-# Claude Code 안에서:
-/plugin marketplace add https://github.com/geun1/claude-tracker
+curl -fsSL https://claude-tracker.gsong.workers.dev/install.sh | bash
+```
+
+스크립트가 묻는 것: **이메일 / 이름 / 팀** (3개). 그게 다입니다.
+
+자동으로 처리되는 것:
+1. 토큰 자체 발급 (서버에 셀프 가입)
+2. `~/.claude/tracker.json` 작성
+3. 플러그인 GitHub clone → `~/.claude/plugins/claude-tracker`
+4. (선택) 과거 transcript 백필
+
+마지막에 안내된 두 줄을 Claude Code 안에서 실행:
+```
+/plugin marketplace add ~/.claude/plugins/claude-tracker
 /plugin install claude-tracker
-
-# 2) 본인 정보 + 토큰 등록
-/tracker-config https://claude-tracker.gsong.workers.dev/events <YOUR_TOKEN> \
-  --email=you@aptner.com --name="이름" --team=AX
-
-# 3) (선택) 과거 세션 백필
-CLAUDE_TRACKER_USER=you@aptner.com CLAUDE_TRACKER_NAME="이름" CLAUDE_TRACKER_TEAM=AX \
-  node ~/.claude/plugins/claude-tracker/scripts/backfill.js \
-    https://claude-tracker.gsong.workers.dev/events <YOUR_TOKEN>
 ```
 
-또는 한 줄로 (curl 가능한 환경):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/geun1/claude-tracker/main/install.sh | bash
-```
+→ 이후 모든 세션이 자동 추적.
 
 ## 관리자 절차
 

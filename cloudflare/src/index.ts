@@ -38,7 +38,9 @@ app.get("/sessions.html", (c) => c.env.ASSETS.fetch(c.req.raw));
 app.get("/health", (c) => c.json({ ok: true, environment: (c.env as any).ENVIRONMENT || "unknown" }));
 
 // ── Auth middleware (skip for static) ──────────────────────────────────────
+const PUBLIC_API = new Set(["/api/signup"]);
 app.use("/api/*", async (c, next) => {
+  if (PUBLIC_API.has(new URL(c.req.url).pathname)) return next();
   const actor = await getActor(c);
   if (!actor) return c.json({ error: "unauthorized" }, 401);
   c.set("actor", actor);
@@ -574,6 +576,140 @@ app.get("/api/me", async (c) => {
   const a = c.get("actor");
   return c.json({ email: a.email, name: a.name, team: a.team, via: a.via, is_admin: a.is_admin });
 });
+
+// ── Self-signup (no admin needed) ─────────────────────────────────────────
+// Anyone with the org code (baked into install.sh) can register a non-admin
+// token. Same email re-signing up rotates the token.
+app.post("/api/signup", async (c) => {
+  const env = c.env as any;
+  const body = await c.req.json<any>().catch(() => ({}));
+  if (!body.email || !body.org_code) return c.json({ error: "email and org_code required" }, 400);
+  if (!env.SIGNUP_CODE) return c.json({ error: "self-signup disabled — set SIGNUP_CODE secret" }, 500);
+  if (body.org_code !== env.SIGNUP_CODE) return c.json({ error: "invalid org code" }, 401);
+  // Revoke any existing tokens for this email so re-running install.sh works
+  await env.DB.prepare("UPDATE tokens SET revoked_at = ? WHERE user_email = ? AND revoked_at IS NULL")
+    .bind(new Date().toISOString(), body.email).run();
+  const raw = generateToken();
+  const hash = await hashToken(raw);
+  await env.DB.prepare(
+    "INSERT INTO tokens (token_hash, user_email, user_name, team, is_admin, created_at, notes) VALUES (?,?,?,?,?,?,?)"
+  ).bind(hash, body.email, body.name || null, body.team || null, 0, new Date().toISOString(), "self-signup").run();
+  return c.json({ ok: true, token: raw, user_email: body.email });
+});
+
+// Dynamic install script — served with SIGNUP_CODE injected so users never see it
+app.get("/install.sh", async (c) => {
+  const env = c.env as any;
+  const url = new URL(c.req.url);
+  const base = `${url.protocol}//${url.host}`;
+  const script = INSTALL_SCRIPT
+    .replaceAll("__BASE__", base)
+    .replaceAll("__SIGNUP_CODE__", env.SIGNUP_CODE || "");
+  return new Response(script, { headers: { "Content-Type": "text/x-shellscript; charset=utf-8" } });
+});
+
+const INSTALL_SCRIPT = `#!/usr/bin/env bash
+# claude-tracker — 셀프 가입 + 자동 설치 스크립트
+# 사용: curl -fsSL __BASE__/install.sh | bash
+set -e
+
+BASE="__BASE__"
+ENDPOINT="$BASE/events"
+ORG_CODE="__SIGNUP_CODE__"
+
+bold() { printf "\\033[1m%s\\033[0m\\n" "$1"; }
+green() { printf "\\033[32m%s\\033[0m\\n" "$1"; }
+red()   { printf "\\033[31m%s\\033[0m\\n" "$1"; }
+
+if [ -z "$ORG_CODE" ]; then
+  red "❌ 서버에 SIGNUP_CODE가 설정되지 않았습니다. 관리자에게 문의."
+  exit 1
+fi
+
+bold "🟧 claude-tracker 설치"
+echo
+
+# 인터랙티브가 가능한지 확인 (curl | bash 환경에서도 stdin이 tty이면 OK)
+if [ ! -t 0 ]; then
+  if [ -t 1 ] && [ -e /dev/tty ]; then exec </dev/tty; else
+    red "❌ 비대화 환경입니다. 터미널에서 직접 실행해 주세요."; exit 1
+  fi
+fi
+
+# 회사 이메일 자동 추정
+DEFAULT_EMAIL="$(git config --global user.email 2>/dev/null || echo '')"
+DEFAULT_NAME="$(git config --global user.name 2>/dev/null || echo '')"
+DEFAULT_TEAM="\${TEAM:-AX}"
+
+read -r -p "이메일 [\$DEFAULT_EMAIL]: " EMAIL; EMAIL="\${EMAIL:-\$DEFAULT_EMAIL}"
+read -r -p "이름 [\$DEFAULT_NAME]: " NAME; NAME="\${NAME:-\$DEFAULT_NAME}"
+read -r -p "팀 [\$DEFAULT_TEAM]: " TEAM; TEAM="\${TEAM:-\$DEFAULT_TEAM}"
+
+if [ -z "\$EMAIL" ]; then red "❌ 이메일은 필수"; exit 1; fi
+
+bold "🔑 토큰 발급 중..."
+RESP=\$(curl -s -X POST "\$BASE/api/signup" -H "Content-Type: application/json" \\
+  -d "{\\"email\\":\\"\$EMAIL\\",\\"name\\":\\"\$NAME\\",\\"team\\":\\"\$TEAM\\",\\"org_code\\":\\"\$ORG_CODE\\"}")
+TOKEN=\$(echo "\$RESP" | sed -n 's/.*"token":"\\([^"]*\\)".*/\\1/p')
+if [ -z "\$TOKEN" ]; then red "❌ 발급 실패: \$RESP"; exit 1; fi
+
+# 1) tracker.json 작성
+mkdir -p "\$HOME/.claude"
+cat > "\$HOME/.claude/tracker.json" <<EOF
+{
+  "endpoint": "\$ENDPOINT",
+  "token": "\$TOKEN",
+  "user_email": "\$EMAIL",
+  "user_name": "\$NAME",
+  "team": "\$TEAM",
+  "local_log_dir": "\$HOME/.claude/tracker-logs"
+}
+EOF
+chmod 600 "\$HOME/.claude/tracker.json"
+green "✅ ~/.claude/tracker.json 생성"
+
+# 2) 플러그인 clone
+PLUGIN_DIR="\$HOME/.claude/plugins/claude-tracker"
+if [ -d "\$PLUGIN_DIR/.git" ]; then
+  bold "🔄 플러그인 업데이트 중..."
+  git -C "\$PLUGIN_DIR" pull --quiet || true
+else
+  bold "📦 플러그인 다운로드 중..."
+  mkdir -p "\$(dirname "\$PLUGIN_DIR")"
+  git clone --depth 1 https://github.com/geun1/claude-tracker.git "\$PLUGIN_DIR" --quiet
+fi
+green "✅ \$PLUGIN_DIR"
+
+# 3) 토큰 자체 검증
+ME=\$(curl -s -H "Authorization: Bearer \$TOKEN" "\$BASE/api/me")
+if echo "\$ME" | grep -q '"email"'; then
+  green "✅ 토큰 검증 OK"
+else
+  red "❌ 토큰 검증 실패: \$ME"; exit 1
+fi
+
+# 4) (선택) 백필
+echo
+read -r -p "과거 Claude Code transcript도 지금 백필할까요? (Y/n) " B
+B="\${B:-Y}"
+if [ "\$B" = "Y" ] || [ "\$B" = "y" ]; then
+  if [ -d "\$HOME/.claude/projects" ] && command -v node >/dev/null; then
+    bold "⏳ 백필 중 (몇 분 걸릴 수 있음)..."
+    CLAUDE_TRACKER_USER="\$EMAIL" CLAUDE_TRACKER_NAME="\$NAME" CLAUDE_TRACKER_TEAM="\$TEAM" \\
+      node "\$PLUGIN_DIR/scripts/backfill.js" "\$ENDPOINT" "\$TOKEN" 2>&1 | tail -3
+  fi
+fi
+
+echo
+green "🎉 설치 완료"
+echo
+bold "마지막 단계 — Claude Code 안에서 한 번만 실행:"
+echo "  /plugin marketplace add \$PLUGIN_DIR"
+echo "  /plugin install claude-tracker"
+echo
+echo "그 다음부터는 모든 세션이 자동으로 추적됩니다."
+echo "본인 대시보드: \$BASE/?token=\$TOKEN"
+`;
 
 // Admin endpoint (admin OR shared bearer)
 app.post("/api/admin/retention", async (c) => {
