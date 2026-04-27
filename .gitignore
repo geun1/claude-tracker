@@ -1,0 +1,13 @@
+node_modules/
+.wrangler/
+.dist/
+dist/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.local
+public/dashboard.html
+public/sessions.html
+package-lock.json
+.DS_Store

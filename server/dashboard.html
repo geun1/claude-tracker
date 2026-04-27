@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Claude Tracker — 전사 대시보드</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { color-scheme: dark; --bg:#0b0d10; --panel:#14181d; --line:#222932; --fg:#e6edf3; --mute:#8b949e; --accent:#ff8c42; --good:#3fb950; --warn:#d29922; }
+  * { box-sizing: border-box }
+  body { margin:0; font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro",Inter,system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:14px; padding:14px 24px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { margin:0; font-size:16px; font-weight:600; }
+  header .grow { flex:1 }
+  header input, header select { background:var(--panel); color:var(--fg); border:1px solid var(--line); padding:6px 10px; border-radius:6px; font-size:13px; }
+  header button { background:var(--accent); color:#000; border:0; padding:6px 14px; border-radius:6px; font-weight:600; cursor:pointer; }
+  header a.btn { background:#1f2630; color:var(--fg); padding:6px 12px; border-radius:6px; font-size:13px; text-decoration:none; border:1px solid var(--line); }
+  main { padding:20px 24px; display:grid; gap:16px; grid-template-columns: repeat(4, 1fr); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .card h3 { margin:0 0 6px; font-size:12px; color:var(--mute); text-transform:uppercase; letter-spacing:.05em; font-weight:500; }
+  .card .num { font-size:26px; font-weight:700; font-variant-numeric: tabular-nums; }
+  .card .num.cost { color:var(--accent); }
+  .card .sub { color:var(--mute); font-size:12px; margin-top:4px; }
+  .wide { grid-column: span 4; }
+  .half { grid-column: span 2; }
+  table { width:100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); font-size:13px; }
+  th { color:var(--mute); font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  tr:hover td { background:#1a2029 }
+  td.num, th.num { text-align:right; font-variant-numeric: tabular-nums; }
+  .pill { display:inline-block; padding:2px 8px; background:#1f2630; border-radius:999px; font-size:11px; color:var(--mute); cursor:pointer; }
+  .pill.active { background:var(--accent); color:#000; }
+  .err { color:#ff6b6b; padding:16px; }
+  canvas { max-height: 280px; }
+  code { background:#1f2630; padding:1px 6px; border-radius:4px; font-size:12px; }
+  a.link { color:var(--accent); text-decoration:none; }
+  a.link:hover { text-decoration:underline; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🟧 Claude Tracker · 전사</h1>
+  <span class="pill" id="healthPill">연결 중…</span>
+  <span class="pill" id="filtersPill" style="display:none"></span>
+  <div class="grow"></div>
+  <label>기간 <select id="days"><option>1</option><option>7</option><option selected>14</option><option>30</option><option>90</option></select> 일</label>
+  <select id="teamFilter"><option value="">전체 팀</option></select>
+  <input id="token" placeholder="Bearer 토큰 (필요 시)" size="22" />
+  <button id="refresh">새로고침</button>
+  <a class="btn" href="/browse">세션 뷰어 →</a>
+  <a id="csvLink" class="btn" href="#">CSV ↓</a>
+</header>
+<main id="app">
+  <div class="card"><h3>총 비용</h3><div class="num cost" id="kCost">—</div><div class="sub" id="kCostSub">USD</div></div>
+  <div class="card"><h3>총 토큰 (입+출)</h3><div class="num" id="kTokens">—</div><div class="sub" id="kTokensSub"></div></div>
+  <div class="card"><h3>활성 사용자 / 팀</h3><div class="num" id="kUsers">—</div><div class="sub">팀 <span id="kTeams">—</span> · 세션 <span id="kSessions">—</span></div></div>
+  <div class="card"><h3>캐시 히트율</h3><div class="num" id="kCache">—</div><div class="sub">cache_read / (input + cache_read)</div></div>
+
+  <div class="card wide"><h3>일별 비용 & 토큰</h3><canvas id="chartDaily"></canvas></div>
+
+  <div class="card half"><h3>팀별 사용량</h3>
+    <table id="tTeams"><thead><tr><th>팀</th><th class="num">사용자</th><th class="num">세션</th><th class="num">토큰</th><th class="num">비용 ($)</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="card half"><h3>모델별 사용량</h3>
+    <table id="tModels"><thead><tr><th>모델</th><th class="num">이벤트</th><th class="num">입력</th><th class="num">출력</th><th class="num">비용 ($)</th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <div class="card half"><h3>도구 사용 TOP</h3>
+    <table id="tTools"><thead><tr><th>도구</th><th class="num">호출</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="card half"><h3>사용자 랭킹 (TOP 토큰)</h3>
+    <table id="tUsers"><thead><tr><th>사용자</th><th>팀</th><th class="num">세션</th><th class="num">토큰</th><th class="num">비용 ($)</th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <div class="card wide"><h3>최근 세션 <span id="userPill" class="pill" style="display:none"></span></h3>
+    <table id="tSessions"><thead><tr><th>Session</th><th>사용자</th><th>팀</th><th>모델</th><th class="num">이벤트</th><th class="num">토큰</th><th class="num">비용 ($)</th><th>마지막</th></tr></thead><tbody></tbody></table>
+  </div>
+</main>
+
+<script>
+const qs = (s) => document.querySelector(s);
+const fmt = (n) => (n==null? "—" : Number(n).toLocaleString());
+const fmtUSD = (n) => "$" + (Number(n||0)).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+const fmtUSDsmall = (n) => "$" + (Number(n||0)).toLocaleString(undefined, { maximumFractionDigits: 4 });
+const fmtTime = (s) => {
+  if (!s) return "";
+  const d = new Date(s); if (isNaN(d)) return s;
+  const f = new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false });
+  const p = Object.fromEntries(f.formatToParts(d).map(x => [x.type, x.value]));
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+};
+let chart, filterUser = null;
+
+const tokenKey = "claude-tracker-token";
+// Allow ?token=… in URL to seed localStorage on first visit
+const _urlTok = new URLSearchParams(location.search).get("token");
+if (_urlTok) { localStorage.setItem(tokenKey, _urlTok); history.replaceState(null, "", location.pathname); }
+qs("#token").value = localStorage.getItem(tokenKey) || "";
+qs("#token").addEventListener("change", e => localStorage.setItem(tokenKey, e.target.value));
+qs("#refresh").addEventListener("click", load);
+qs("#days").addEventListener("change", load);
+qs("#teamFilter").addEventListener("change", load);
+
+function buildQuery(extra = {}) {
+  const params = new URLSearchParams();
+  params.set("days", qs("#days").value);
+  const team = qs("#teamFilter").value;
+  if (team) params.set("team", team);
+  if (filterUser) params.set("user", filterUser);
+  const t = qs("#token").value.trim();
+  if (t) params.set("token", t);
+  for (const [k,v] of Object.entries(extra)) if (v) params.set(k, v);
+  return params.toString();
+}
+
+async function api(path) {
+  const url = `${path}${path.includes("?") ? "&" : "?"}${buildQuery()}`;
+  const r = await fetch(url);
+  if (r.status === 401) throw new Error("unauthorized — 토큰 확인");
+  if (!r.ok) throw new Error(`HTTP ${r.status} on ${path}`);
+  return r.json();
+}
+
+async function load() {
+  qs("#csvLink").href = `/export.csv?${buildQuery()}`;
+  const filters = [];
+  if (qs("#teamFilter").value) filters.push(`team=${qs("#teamFilter").value}`);
+  if (filterUser) filters.push(`user=${filterUser}`);
+  const fp = qs("#filtersPill");
+  if (filters.length) { fp.style.display = "inline-block"; fp.classList.add("active"); fp.textContent = "필터: " + filters.join(" · ") + " ✕"; fp.onclick = () => { filterUser = null; qs("#teamFilter").value = ""; load(); }; }
+  else fp.style.display = "none";
+
+  try {
+    const h = await fetch("/health").then(r => r.json()).catch(() => null);
+    qs("#healthPill").textContent = h?.ok ? "서버 OK" : "서버 오프라인";
+
+    const [stats, ts, users, teams, sessions] = await Promise.all([
+      api("/stats"), api("/timeseries"), api("/users"), api("/teams"), api(`/sessions?limit=200`),
+    ]);
+
+    // Populate team filter once
+    const sel = qs("#teamFilter");
+    if (sel.options.length <= 1) {
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">전체 팀</option>' + teams.map(t => `<option value="${t.team}">${t.team}</option>`).join("");
+      sel.value = cur;
+    }
+
+    const t = stats.totals;
+    qs("#kCost").textContent = fmtUSD(t.cost_usd);
+    qs("#kCostSub").textContent = `${stats.byModel.length} 모델 사용`;
+    const totTok = (t.input_tokens||0) + (t.output_tokens||0);
+    qs("#kTokens").textContent = fmt(totTok);
+    qs("#kTokensSub").textContent = `입력 ${fmt(t.input_tokens)} · 출력 ${fmt(t.output_tokens)}`;
+    qs("#kUsers").textContent = fmt(t.users);
+    qs("#kTeams").textContent = fmt(t.teams);
+    qs("#kSessions").textContent = fmt(t.sessions);
+    const hit = (t.cache_read_tokens || 0) / Math.max(1, (t.input_tokens || 0) + (t.cache_read_tokens || 0));
+    qs("#kCache").textContent = (hit * 100).toFixed(1) + "%";
+
+    renderChart(ts.rows);
+
+    fillTable("#tTeams tbody", teams, x => [
+      `<a href="#" class="link" data-team="${x.team}">${x.team}</a>`,
+      x.users, x.sessions, fmt((x.input_tokens||0)+(x.output_tokens||0)), fmtUSD(x.cost_usd)
+    ]);
+    document.querySelectorAll("#tTeams a[data-team]").forEach(a =>
+      a.addEventListener("click", e => { e.preventDefault(); qs("#teamFilter").value = a.dataset.team; load(); })
+    );
+
+    fillTable("#tModels tbody", stats.byModel, m => [
+      m.model, m.n, fmt(m.input_tokens), fmt(m.output_tokens), fmtUSD(m.cost_usd)
+    ]);
+    fillTable("#tTools tbody", stats.byTool, x => [x.tool_name, x.n]);
+    fillTable("#tUsers tbody", users, u => [
+      `<a href="#" class="link" data-user="${u.user_email}">${u.user_name || u.user_email}</a>`,
+      u.team || "—", u.sessions, fmt((u.input_tokens||0)+(u.output_tokens||0)), fmtUSD(u.cost_usd)
+    ]);
+    document.querySelectorAll("#tUsers a[data-user]").forEach(a =>
+      a.addEventListener("click", e => { e.preventDefault(); filterUser = a.dataset.user; load(); })
+    );
+
+    fillTable("#tSessions tbody", sessions.slice(0, 100), s => [
+      `<code>${(s.session_id||"").slice(0,12)}</code>`,
+      s.user_email || "—", s.team || "—", s.model || "—", s.events,
+      fmt((s.input_tokens||0)+(s.output_tokens||0)),
+      fmtUSDsmall(s.cost_usd),
+      fmtTime(s.last_event)
+    ]);
+
+    const up = qs("#userPill");
+    if (filterUser) { up.style.display = "inline-block"; up.classList.add("active"); up.textContent = `${filterUser} ✕`; up.onclick = () => { filterUser = null; load(); }; }
+    else up.style.display = "none";
+  } catch (e) {
+    qs("#app").insertAdjacentHTML("afterbegin", `<div class="card wide err">⚠ ${e.message}</div>`);
+  }
+}
+
+function fillTable(sel, rows, map) {
+  const tb = qs(sel);
+  const headerCells = tb.closest("table").querySelectorAll("thead th");
+  tb.innerHTML = rows.length ? rows.map(r => {
+    const cells = map(r);
+    return "<tr>" + cells.map((c,i) =>
+      `<td${headerCells[i]?.classList.contains("num")?' class="num"':""}>${c ?? ""}</td>`
+    ).join("") + "</tr>";
+  }).join("") : `<tr><td colspan="9" style="color:var(--mute);text-align:center;padding:20px">데이터 없음</td></tr>`;
+}
+
+function renderChart(rows) {
+  const labels = rows.map(r => r.day);
+  const data = {
+    labels,
+    datasets: [
+      { type:"bar", label: "Input",      data: rows.map(r => r.input_tokens || 0),       backgroundColor: "#ff8c42", yAxisID:"y" },
+      { type:"bar", label: "Output",     data: rows.map(r => r.output_tokens || 0),      backgroundColor: "#4da3ff", yAxisID:"y" },
+      { type:"bar", label: "Cache Read", data: rows.map(r => r.cache_read_tokens || 0),  backgroundColor: "#3a3f47", yAxisID:"y" },
+      { type:"line", label: "비용 ($)",  data: rows.map(r => +(r.cost_usd || 0).toFixed(2)), borderColor: "#3fb950", backgroundColor:"#3fb95033", yAxisID:"y1", tension:0.25, pointRadius:3 },
+    ],
+  };
+  const opts = {
+    responsive: true, maintainAspectRatio: false,
+    scales: {
+      x:  { stacked:true, grid:{color:"#1f2630"}, ticks:{color:"#8b949e"} },
+      y:  { stacked:true, position:"left",  grid:{color:"#1f2630"}, ticks:{color:"#8b949e", callback: v => v >= 1e6 ? (v/1e6).toFixed(1)+"M" : v >= 1e3 ? (v/1e3).toFixed(0)+"k" : v } },
+      y1: { position:"right", grid:{display:false}, ticks:{color:"#3fb950", callback: v => "$"+v} },
+    },
+    plugins: { legend: { labels: { color: "#e6edf3" } } },
+  };
+  if (chart) { chart.data = data; chart.options = opts; chart.update(); }
+  else chart = new Chart(qs("#chartDaily"), { data, options: opts });
+}
+
+load();
+</script>
+</body>
+</html>

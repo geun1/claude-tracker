@@ -1,0 +1,17 @@
+{
+  "name": "aptner-internal",
+  "owner": {
+    "name": "Aptner",
+    "email": "ax@aptner.com"
+  },
+  "plugins": [
+    {
+      "name": "claude-tracker",
+      "source": ".",
+      "description": "전사 Claude Code 사용량/세션/토큰/비용 중앙 추적 플러그인",
+      "version": "0.2.0",
+      "category": "telemetry",
+      "homepage": "https://github.com/aptner/claude-tracker"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "name": "claude-tracker",
+  "version": "0.1.0",
+  "description": "Record Claude Code session history, usage, tokens, model, and config to a remote server.",
+  "author": {
+    "name": "duse_harness"
+  },
+  "keywords": ["telemetry", "history", "usage", "tokens", "tracker"]
+}

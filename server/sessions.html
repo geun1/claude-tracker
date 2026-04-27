@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Claude Tracker · 세션 뷰어</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:#0b0e14;
+    --panel:#111620;
+    --panel-2:#161c27;
+    --line:#1f2632;
+    --line-2:#2a3140;
+    --fg:#e5e9f0;
+    --mute:#7d8590;
+    --dim:#5e6673;
+    --accent:#3b82f6;
+    --accent-soft:#1e3a8a55;
+    --user-bubble:#1e2a3b;
+    --user-border:#2c3e57;
+    --asst:#10b981;
+    --tool:#f59e0b;
+    --err:#ef4444;
+    --code-bg:#0a0e14;
+  }
+  * { box-sizing: border-box }
+  html, body { height:100%; margin:0; }
+  body { font:14px/1.6 -apple-system,BlinkMacSystemFont,"Pretendard","SF Pro",Inter,system-ui,sans-serif; background:var(--bg); color:var(--fg); display:grid; grid-template-rows:auto 1fr; }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb { background:#2a3140; border-radius:5px; border:2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background:#3a4252; }
+
+  /* ── Top bar ── */
+  header { display:flex; align-items:center; gap:12px; padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel); flex-wrap:nowrap; }
+  header h1 { margin:0; font-size:14px; font-weight:600; display:flex; align-items:center; gap:8px; flex-shrink:0; }
+  header h1 .crumb { color:var(--mute); font-weight:400; }
+  header h1 .sep { color:var(--dim); margin:0 8px; }
+  header .terminal-pill { background:var(--panel-2); border:1px solid var(--line); padding:5px 12px; border-radius:6px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:12px; color:var(--mute); display:flex; align-items:center; gap:6px; }
+  header .grow { flex:1 }
+  header .search-input { background:var(--panel-2); color:var(--fg); border:1px solid var(--line); padding:7px 12px; border-radius:8px; font-size:13px; width:280px; }
+  header .icon-btn { background:var(--panel-2); border:1px solid var(--line); color:var(--fg); padding:7px 11px; border-radius:8px; font-size:13px; cursor:pointer; display:inline-flex; align-items:center; gap:5px; text-decoration:none; }
+  header .icon-btn:hover { background:#1c232f; border-color:var(--line-2); }
+  header .icon-btn.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+
+  /* ── Layout ── */
+  .layout { display:flex; min-height:0; height:100%; }
+  .pane { display:flex; flex-direction:column; border-right:1px solid var(--line); min-height:0; background:var(--panel); flex-shrink:0; }
+  .pane:last-child { border-right:none; }
+  .pane.collapsed { display:none; }
+  .pane.users { width:240px; background:var(--panel); }
+  .pane.sessions { width:320px; background:var(--panel); }
+  .pane.conv { flex:1; min-width:0; background:var(--bg); border-right:1px solid var(--line); }
+  .pane.index { width:280px; background:var(--panel); }
+  .pane > .scroll { overflow-y:auto; flex:1; }
+  .pane h3 { margin:0; padding:14px 16px 10px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--mute); display:flex; align-items:center; justify-content:space-between; gap:8px; flex-shrink:0; }
+  .pane h3 .badge { background:var(--accent); color:#fff; padding:2px 9px; border-radius:10px; font-size:10px; font-weight:600; letter-spacing:0; }
+
+  /* ── List items (left side) ── */
+  .item { padding:11px 16px; border-bottom:1px solid var(--line); cursor:pointer; transition:background .12s; }
+  .item:hover { background:#161c27 }
+  .item.active { background:var(--accent-soft); border-left:3px solid var(--accent); padding-left:13px; }
+  .item .name { font-weight:600; font-size:13px; line-height:1.4; color:var(--fg); display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
+  .item .name .text { flex:1; word-break:break-word; }
+  .item .sub { color:var(--mute); font-size:11.5px; margin-top:5px; line-height:1.4; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .item .sub .id { font-family: ui-monospace, monospace; color:var(--dim); }
+  .pill { display:inline-block; background:var(--panel-2); color:var(--mute); padding:1px 8px; border-radius:10px; font-size:10.5px; }
+  .pill.accent { background:var(--accent); color:#fff; }
+  .pill.team { background:var(--accent-soft); color:#93c5fd; }
+
+  /* ── Conversation header (filter row) ── */
+  .conv-toolbar { padding:12px 24px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; align-items:center; gap:10px; flex-shrink:0; }
+  .conv-toolbar .search { background:var(--panel-2); color:var(--fg); border:1px solid var(--line); padding:7px 12px; border-radius:8px; font-size:13px; flex:1; max-width:480px; }
+  .conv-toolbar button.tb { background:var(--panel-2); border:1px solid var(--line); color:var(--fg); padding:6px 12px; border-radius:8px; font-size:12px; cursor:pointer; }
+  .conv-toolbar button.tb:hover { background:#1c232f; }
+  .filter-row { padding:12px 24px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; align-items:center; gap:8px; flex-wrap:wrap; flex-shrink:0; }
+  .filter-row .count-pill { background:var(--panel-2); color:var(--mute); padding:5px 11px; border-radius:8px; font-size:12px; font-weight:500; }
+  .chip { display:inline-flex; align-items:center; gap:6px; padding:5px 12px; border-radius:8px; border:1px solid var(--line); background:var(--panel-2); color:var(--mute); cursor:pointer; user-select:none; font-size:12px; transition:all .12s; }
+  .chip:hover { border-color:var(--line-2); color:var(--fg); }
+  .chip.active { background:var(--accent-soft); border-color:var(--accent); color:#bfdbfe; }
+  .chip .ic { font-size:13px; }
+
+  /* ── Conversation body ── */
+  .conv .scroll { padding:0; }
+  .conv-body { padding:24px 0 80px; max-width:880px; margin:0 auto; }
+
+  /* Day separator */
+  .day-sep { display:flex; justify-content:center; margin:30px 0 20px; }
+  .day-sep span { background:var(--panel-2); color:var(--mute); padding:6px 16px; border-radius:14px; font-size:12px; }
+
+  /* ── Message blocks ── */
+  .msg { padding:0 24px; margin-bottom:28px; }
+  .msg .meta { font-size:12px; color:var(--mute); margin-bottom:10px; display:flex; align-items:center; gap:10px; }
+  .msg .meta .role { font-weight:600; color:var(--fg); font-size:13px; }
+  .msg .meta .dot { color:var(--dim); }
+  .msg .meta .model { margin-left:auto; color:var(--mute); font-family:ui-monospace,monospace; font-size:11px; }
+  .msg .meta .help { color:var(--dim); cursor:help; }
+
+  /* User message — pill on the right */
+  .msg.user { display:flex; flex-direction:column; align-items:flex-end; }
+  .msg.user .meta { width:100%; justify-content:flex-end; gap:8px; }
+  .msg.user .bubble { background:var(--user-bubble); border:1px solid var(--user-border); border-radius:18px; padding:13px 18px; max-width:78%; }
+  .msg.user .bubble .text { color:var(--fg); font-size:14px; line-height:1.65; white-space:pre-wrap; word-break:break-word; }
+
+  /* Assistant message — no box, just text */
+  .msg.assistant .bubble { padding:0; max-width:100%; }
+  .msg.assistant .text { color:var(--fg); font-size:14px; line-height:1.7; white-space:pre-wrap; word-break:break-word; }
+  .msg.assistant .text strong { color:#fff; font-weight:600; }
+  .msg.assistant .text em { color:#cbd5e1; font-style:italic; }
+  .msg.assistant .text a { color:#60a5fa; text-decoration:underline; text-underline-offset:2px; }
+  .msg.assistant .text code { background:var(--code-bg); padding:1px 7px; border-radius:5px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:12.5px; color:#f0abfc; border:1px solid var(--line); }
+  .msg.assistant .text pre.codeblock { background:var(--code-bg); border:1px solid var(--line); border-radius:10px; padding:14px 16px; overflow-x:auto; font-family: ui-monospace, monospace; font-size:12.5px; line-height:1.6; color:#cdd9e5; margin:10px 0; white-space:pre; }
+  .msg.assistant h1, .msg.assistant h2, .msg.assistant h3 { font-weight:600; margin:14px 0 8px; }
+
+  /* Collapsible long content (CCHV "더 보기" pattern) */
+  .collapsible { position:relative; max-height:none; }
+  .collapsible.collapsed { max-height:140px; overflow:hidden; }
+  .collapsible.collapsed::after { content:""; position:absolute; bottom:0; left:0; right:0; height:60px; background:linear-gradient(transparent, var(--bg)); pointer-events:none; }
+  .msg.user .collapsible.collapsed::after { background:linear-gradient(transparent, var(--user-bubble)); }
+  .more-btn { display:inline-flex; align-items:center; gap:6px; margin-top:8px; padding:6px 12px; background:transparent; border:0; color:var(--mute); font-size:12.5px; cursor:pointer; border-radius:6px; }
+  .more-btn:hover { color:var(--accent); background:var(--panel-2); }
+
+  /* Thinking */
+  details.thinking { margin:10px 0; border:1px solid var(--line); border-radius:10px; background:var(--panel); }
+  details.thinking summary { cursor:pointer; padding:10px 14px; font-size:12px; color:var(--mute); list-style:none; user-select:none; display:flex; align-items:center; gap:8px; }
+  details.thinking summary::-webkit-details-marker { display:none; }
+  details.thinking summary::before { content:"▸"; color:var(--dim); font-size:10px; }
+  details.thinking[open] summary::before { content:"▾"; }
+  details.thinking .body { padding:0 14px 14px; color:var(--mute); font-size:12.5px; line-height:1.6; white-space:pre-wrap; max-height:320px; overflow-y:auto; font-style:italic; }
+
+  /* Tool call card */
+  .toolcall { margin:10px 0; border:1px solid var(--line); border-radius:10px; background:var(--panel); overflow:hidden; }
+  .toolcall summary { cursor:pointer; padding:11px 16px; font-size:12.5px; display:flex; align-items:center; gap:10px; list-style:none; user-select:none; }
+  .toolcall summary::-webkit-details-marker { display:none; }
+  .toolcall summary::before { content:"▸"; color:var(--dim); font-size:10px; }
+  .toolcall[open] summary::before { content:"▾"; }
+  .toolcall summary .ic { color:var(--tool); font-weight:600; font-family: ui-monospace, monospace; font-size:13px; display:flex; align-items:center; gap:6px; }
+  .toolcall .preview { color:var(--mute); font-family:ui-monospace,monospace; font-size:11.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+  .toolcall .status { font-size:11px; padding:3px 10px; border-radius:8px; background:#10b98122; color:var(--asst); display:inline-flex; align-items:center; gap:4px; }
+  .toolcall .status.err { background:#ef444422; color:var(--err); }
+  .toolcall[open] { border-color:var(--line-2); }
+  .toolcall .body { padding:14px 16px; border-top:1px solid var(--line); background:var(--panel-2); }
+  .toolcall .label { font-size:10.5px; color:var(--mute); text-transform:uppercase; letter-spacing:.08em; margin-bottom:6px; }
+  .codeblk { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:12px; background:var(--code-bg); border-radius:8px; padding:12px 14px; overflow-x:auto; margin:0; color:#cdd9e5; line-height:1.6; white-space:pre; border:1px solid var(--line); }
+  .codeblk.wrap { white-space:pre-wrap; word-break:break-word; }
+
+  /* Tool result inline (away_summary style) */
+  .tool-inline { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 18px; margin:10px 0; }
+  .tool-inline .head { display:flex; align-items:center; gap:8px; color:var(--mute); font-size:12px; margin-bottom:6px; }
+  .tool-inline .head .ic { color:var(--accent); font-size:14px; }
+  .tool-inline .head .name { font-family:ui-monospace,monospace; color:var(--fg); font-weight:500; }
+  .tool-inline .body { color:var(--fg); font-size:13.5px; line-height:1.65; white-space:pre-wrap; word-break:break-word; }
+
+  /* Right rail message index (CCHV-style numbered) */
+  .index-search { padding:8px 12px; border-bottom:1px solid var(--line); }
+  .index-search input { width:100%; background:var(--panel-2); color:var(--fg); border:1px solid var(--line); padding:7px 10px; border-radius:6px; font-size:12px; }
+  .index-item { padding:10px 14px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .index-item:hover { background:#161c27 }
+  .index-item.active { background:var(--accent-soft); }
+  .index-item .head { display:flex; justify-content:space-between; align-items:center; gap:6px; }
+  .index-item .head .left { display:flex; align-items:center; gap:8px; }
+  .index-item .seq { color:var(--mute); font-family: ui-monospace, monospace; font-size:11px; }
+  .index-item .seq.dot::before { content:"●"; color:#fbbf24; margin-right:6px; }
+  .index-item.user .seq.dot::before { color:var(--accent); }
+  .index-item.assistant .seq.dot::before { color:var(--asst); }
+  .index-item .time { color:var(--dim); font-size:10.5px; }
+  .index-item .body { color:var(--fg); font-size:12px; margin-top:4px; line-height:1.4; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+  .index-item.tool .body::before { content:"🔧 "; color:var(--tool); }
+
+  /* Floating scroll buttons (CCHV bottom-right pill) */
+  .scroll-fab { position:fixed; bottom:24px; right:24px; display:flex; flex-direction:column; gap:4px; background:var(--panel); border:1px solid var(--line); border-radius:24px; padding:6px; z-index:5; box-shadow: 0 4px 12px rgba(0,0,0,.4); }
+  .scroll-fab button { width:36px; height:36px; border-radius:50%; background:var(--panel-2); border:0; color:var(--accent); font-size:14px; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  .scroll-fab button:hover { background:var(--accent); color:#fff; }
+
+  /* Status footer */
+  .status-bar { padding:8px 20px; border-top:1px solid var(--line); background:var(--panel); display:flex; align-items:center; gap:18px; font-size:11.5px; color:var(--mute); flex-shrink:0; }
+  .status-bar .dot::before { content:"●"; color:var(--asst); margin-right:4px; }
+
+  /* Modal */
+  .modal-bg { display:none; position:fixed; inset:0; background:#000a; z-index:10; align-items:center; justify-content:center; }
+  .modal-box { background:var(--panel); border:1px solid var(--line); border-radius:14px; max-width:720px; width:90%; max-height:80vh; overflow:auto; padding:28px; }
+
+  .empty { color:var(--mute); padding:80px 24px; text-align:center; font-size:13px; }
+  .skel { padding:40px 24px; max-width:880px; margin:0 auto; }
+  .skel .row { height:14px; background:linear-gradient(90deg,var(--panel),var(--panel-2),var(--panel)); background-size:200% 100%; border-radius:6px; margin-bottom:12px; animation:sh 1.4s infinite linear; }
+  @keyframes sh { 0% {background-position:200% 0} 100% {background-position:-200% 0} }
+</style>
+</head>
+<body>
+<header>
+  <h1>🟧 <span>Claude Tracker</span><span class="sep">/</span><span class="crumb" id="crumbProj">세션 뷰어</span></h1>
+  <span class="terminal-pill" id="terminalPill" style="display:none">›_<span id="terminalSid">—</span></span>
+  <div class="grow"></div>
+  <input id="search" class="search-input" placeholder="🔍 메시지 검색..." />
+  <button class="icon-btn" id="togUsers" title="사용자 (1)">👤</button>
+  <button class="icon-btn" id="togSessions" title="세션 (2)">📋</button>
+  <button class="icon-btn" id="togIndex" title="메시지 (3)">📑</button>
+  <a class="icon-btn" href="/">📊</a>
+</header>
+
+<div class="layout">
+  <div class="pane users" id="paneUsers">
+    <h3>탐색기 <span class="badge" id="userCount">0</span></h3>
+    <div class="scroll" id="users"></div>
+  </div>
+  <div class="pane sessions" id="paneSessions">
+    <h3>세션 <span class="badge" id="sessionCount">0</span></h3>
+    <div class="scroll" id="sessions"></div>
+  </div>
+  <div class="pane conv" id="paneConv">
+    <div class="scroll" id="convScroll"><div class="empty">왼쪽에서 사용자 → 세션을 선택하세요</div></div>
+    <div class="scroll-fab" id="fab" style="display:none">
+      <button id="fabUp" title="위로">↑</button>
+      <button id="fabDown" title="아래로">↓</button>
+    </div>
+  </div>
+  <div class="pane index" id="paneIndex">
+    <h3>메시지 <span class="badge" id="msgCount">0</span></h3>
+    <div class="index-search"><input id="msgsearch" placeholder="메시지 필터..." /></div>
+    <div class="scroll" id="index"></div>
+  </div>
+</div>
+
+<div class="modal-bg" id="planModal" onclick="if(event.target===this)this.style.display='none'">
+  <div class="modal-box">
+    <div id="planContent">로딩…</div>
+    <div style="text-align:right;margin-top:16px"><button class="icon-btn" onclick="document.getElementById('planModal').style.display='none'">닫기</button></div>
+  </div>
+</div>
+
+<script>
+const qs = (s) => document.querySelector(s);
+const fmt = (n) => Number(n||0).toLocaleString();
+const fmtUSD = (n) => "$" + Number(n||0).toLocaleString(undefined, { maximumFractionDigits: 4 });
+
+const fmtDate = (s) => {
+  if (!s) return "";
+  const d = new Date(s); if (isNaN(d)) return s;
+  const f = new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", year:"numeric", month:"long", day:"numeric", weekday:"long" });
+  return f.format(d);
+};
+const fmtTime = (s) => {
+  if (!s) return "";
+  const d = new Date(s); if (isNaN(d)) return s;
+  const f = new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", hour:"2-digit", minute:"2-digit", hour12:true });
+  return f.format(d);
+};
+const fmtDay = (s) => {
+  if (!s) return "";
+  const d = new Date(s); if (isNaN(d)) return "";
+  const f = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" });
+  return f.format(d);
+};
+const fmtRel = (s) => {
+  if (!s) return "";
+  const diff = (Date.now() - new Date(s).getTime()) / 1000;
+  if (diff < 60) return "방금";
+  if (diff < 3600) return Math.floor(diff/60) + "분 전";
+  if (diff < 86400) return Math.floor(diff/3600) + "시간 전";
+  return Math.floor(diff/86400) + "일 전";
+};
+const fmtDur = (s) => {
+  if (!s || s < 0) return "";
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s/60) + "m " + (s%60) + "s";
+  return Math.floor(s/3600) + "h " + Math.floor((s%3600)/60) + "m";
+};
+const escapeHtml = (s) => (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+
+function renderMd(s) {
+  if (!s) return "";
+  let t = escapeHtml(s);
+  t = t.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) => `<pre class="codeblock">${code}</pre>`);
+  t = t.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  t = t.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  t = t.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+  t = t.replace(/(^|\s)(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+  return t;
+}
+
+let selectedUser = null, selectedSession = null, messages = [], visibleMessages = [];
+let messageFilter = "all";
+
+const tokenKey = "claude-tracker-token";
+const _urlTok = new URLSearchParams(location.search).get("token");
+if (_urlTok) { localStorage.setItem(tokenKey, _urlTok);
+  // Strip token from URL but preserve other params
+  const _u = new URL(location.href); _u.searchParams.delete("token");
+  history.replaceState(null, "", _u.pathname + _u.search); }
+qs("#token") && (qs("#token").value = localStorage.getItem(tokenKey) || "");
+
+const url = new URL(location.href);
+selectedUser = url.searchParams.get("user");
+selectedSession = url.searchParams.get("session");
+
+function withToken(p) { const t = localStorage.getItem(tokenKey); return t ? p + (p.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(t) : p; }
+async function api(p) { const r = await fetch(withToken(p)); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }
+
+// Pane state
+const defaultPanes = selectedSession ? { users: 0, sessions: 1, index: 1 } : { users: 1, sessions: 1, index: 1 };
+const paneState = JSON.parse(localStorage.getItem("ct-panes") || JSON.stringify(defaultPanes));
+function applyPanes() {
+  for (const k of ["users", "sessions", "index"]) {
+    const cap = k[0].toUpperCase()+k.slice(1);
+    qs(`#pane${cap}`).classList.toggle("collapsed", !paneState[k]);
+    qs(`#tog${cap}`).classList.toggle("on", !!paneState[k]);
+  }
+  localStorage.setItem("ct-panes", JSON.stringify(paneState));
+}
+applyPanes();
+for (const k of ["users", "sessions", "index"]) {
+  const cap = k[0].toUpperCase()+k.slice(1);
+  qs(`#tog${cap}`).addEventListener("click", () => { paneState[k] = !paneState[k]; applyPanes(); });
+}
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  if (e.key === "1") { paneState.users = !paneState.users; applyPanes(); }
+  else if (e.key === "2") { paneState.sessions = !paneState.sessions; applyPanes(); }
+  else if (e.key === "3" || e.key === "[") { paneState.index = !paneState.index; applyPanes(); }
+});
+
+async function loadUsers() {
+  const users = await api("/api/users");
+  qs("#userCount").textContent = users.length;
+  qs("#users").innerHTML = users.map(u => `
+    <div class="item ${u.user_email === selectedUser ? "active" : ""}" data-email="${u.user_email}">
+      <div class="name">
+        <span class="text">${escapeHtml(u.user_name || u.user_email)}</span>
+        <a href="#" class="planlink" data-plan="${u.user_email}" style="font-size:11px;color:var(--accent);text-decoration:none;flex-shrink:0">플랜▸</a>
+      </div>
+      <div class="sub">${u.team ? `<span class="pill team">${escapeHtml(u.team)}</span>` : ""}<span style="color:var(--dim)">${escapeHtml(u.user_email)}</span></div>
+      <div class="sub"><span>${u.sessions} 세션</span><span style="color:var(--dim)">·</span><span>${fmtRel(u.last_seen)}</span></div>
+    </div>
+  `).join("");
+  document.querySelectorAll("#users .item").forEach(el => {
+    el.addEventListener("click", () => {
+      selectedUser = el.dataset.email; selectedSession = null; pushUrl();
+      loadUsers(); loadSessions();
+      qs("#convScroll").innerHTML = '<div class="empty">세션을 선택하세요</div>';
+      qs("#index").innerHTML = ""; qs("#msgCount").textContent = "0";
+      qs("#terminalPill").style.display = "none";
+    });
+  });
+  document.querySelectorAll("#users .planlink").forEach(a => {
+    a.addEventListener("click", e => { e.preventDefault(); e.stopPropagation(); openPlan(a.dataset.plan); });
+  });
+  if (selectedUser) loadSessions();
+}
+
+async function loadSessions() {
+  if (!selectedUser) return;
+  const sessions = await api(`/api/sessions?user=${encodeURIComponent(selectedUser)}&limit=500`);
+  qs("#sessionCount").textContent = sessions.length;
+  qs("#sessions").innerHTML = sessions.length ? sessions.map(s => {
+    const projName = (s.cwd || "").split("/").filter(Boolean).slice(-2).join("/") || "—";
+    const title = s.first_user_msg || s.session_id;
+    return `
+      <div class="item ${s.session_id === selectedSession ? "active" : ""}" data-sid="${s.session_id}">
+        <div class="name"><span class="text">💬 ${escapeHtml(title.slice(0, 80))}</span></div>
+        <div class="sub">
+          <span style="display:flex;align-items:center;gap:4px">🕐 ${fmtRel(s.last_event)}</span>
+          <span class="id">#${s.events}</span>
+          <span class="pill">${escapeHtml((s.model || "—").replace("claude-",""))}</span>
+        </div>
+        <div class="sub"><span style="color:var(--dim)">📂 ${escapeHtml(projName)}</span></div>
+      </div>
+    `;
+  }).join("") : '<div class="empty">세션 없음</div>';
+  document.querySelectorAll("#sessions .item").forEach(el => {
+    el.addEventListener("click", () => { selectedSession = el.dataset.sid; pushUrl(); loadSessions(); loadDetail(); });
+  });
+  if (selectedSession) loadDetail();
+}
+
+async function loadDetail() {
+  if (!selectedSession) return;
+  const scroll = qs("#convScroll");
+  scroll.innerHTML = `<div class="skel">${"<div class='row' style='width:60%'></div><div class='row' style='width:90%'></div><div class='row' style='width:75%'></div>".repeat(5)}</div>`;
+  qs("#crumbProj").textContent = `세션 / ${selectedSession.slice(0,8)}`;
+  qs("#terminalPill").style.display = "inline-flex";
+  qs("#terminalSid").textContent = selectedSession.slice(0,8);
+
+  let data;
+  try { data = await api(`/api/sessions/${selectedSession}/messages`); }
+  catch (e) { scroll.innerHTML = `<div class="empty">에러: ${e.message}</div>`; return; }
+
+  const s = data.session || {};
+  messages = data.messages || [];
+
+  // Filter empty assistant turns
+  visibleMessages = messages.filter(m => {
+    if (m.role === "user") return true;
+    return (m.text && m.text.trim()) || (m.thinking && m.thinking.trim()) || (m.tool_calls && m.tool_calls.length) || m.tool_result;
+  });
+  qs("#msgCount").textContent = visibleMessages.length;
+
+  // Compute response durations
+  for (let i = 0; i < visibleMessages.length; i++) {
+    if (visibleMessages[i].role === "assistant") {
+      for (let j = i - 1; j >= 0; j--) {
+        if (visibleMessages[j].role !== "assistant") {
+          visibleMessages[i]._respMs = new Date(visibleMessages[i].ts) - new Date(visibleMessages[j].ts);
+          break;
+        }
+      }
+    }
+  }
+
+  // Counts for filter chips
+  const counts = {
+    all: visibleMessages.length,
+    user: visibleMessages.filter(m => m.role === "user").length,
+    assistant: visibleMessages.filter(m => m.role === "assistant" && m.text && m.text.trim()).length,
+    text: visibleMessages.filter(m => m.text && m.text.trim()).length,
+    thinking: visibleMessages.filter(m => m.thinking && m.thinking.trim()).length,
+    tool: visibleMessages.filter(m => m.tool_calls && m.tool_calls.length).length,
+    bash: visibleMessages.filter(m => m.tool_calls?.some(t => t.name === "Bash")).length,
+  };
+
+  const projName = (s.cwd || "").split("/").filter(Boolean).slice(-1)[0] || "";
+
+  // Build conv with filter row + grouped by day
+  const toolbar = `
+    <div class="conv-toolbar">
+      <button class="tb">← 이전</button>
+      <button class="tb on" style="background:var(--accent-soft);border-color:var(--accent);color:#bfdbfe">내용</button>
+      <button class="tb">도구 ID</button>
+      <input class="search" id="convSearch" placeholder="🔍 대화 내용 검색..." />
+      <button class="tb">📷 캡처 모드</button>
+      <button class="tb">⬇ 내보내기</button>
+    </div>
+    <div class="filter-row">
+      <span class="count-pill">⚙ ${counts.all}</span>
+      <span class="chip ${messageFilter==='user'?'active':''}" data-filter="user"><span class="ic">👤</span>사용자 ${counts.user}</span>
+      <span class="chip ${messageFilter==='assistant'?'active':''}" data-filter="assistant"><span class="ic">🤖</span>어시스턴트 ${counts.assistant}</span>
+      <span class="chip ${messageFilter==='text'?'active':''}" data-filter="text"><span class="ic">📝</span>텍스트 ${counts.text}</span>
+      <span class="chip ${messageFilter==='thinking'?'active':''}" data-filter="thinking"><span class="ic">💭</span>사고 과정 ${counts.thinking}</span>
+      <span class="chip ${messageFilter==='tool'?'active':''}" data-filter="tool"><span class="ic">🔧</span>도구 호출 ${counts.tool}</span>
+      <span class="chip ${messageFilter==='bash'?'active':''}" data-filter="bash"><span class="ic">›_</span>명령어 ${counts.bash}</span>
+    </div>`;
+
+  // Group by day with separators
+  let bodyHtml = '<div class="conv-body" id="convBody">';
+  let lastDay = null;
+  for (const m of visibleMessages) {
+    const day = fmtDay(m.ts);
+    if (day !== lastDay) {
+      bodyHtml += `<div class="day-sep"><span>${escapeHtml(fmtDate(m.ts))}</span></div>`;
+      lastDay = day;
+    }
+    bodyHtml += renderMsg(m);
+  }
+  bodyHtml += '</div>';
+
+  scroll.innerHTML = toolbar + bodyHtml;
+
+  document.querySelectorAll("#paneConv .chip").forEach(c => {
+    c.addEventListener("click", () => {
+      messageFilter = (messageFilter === c.dataset.filter) ? "all" : c.dataset.filter;
+      loadDetail();
+    });
+  });
+  qs("#convSearch")?.addEventListener("input", (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll("#convBody .msg").forEach(el => {
+      if (!q) { el.style.opacity = 1; return; }
+      el.style.opacity = el.textContent.toLowerCase().includes(q) ? 1 : 0.15;
+    });
+  });
+
+  // Apply filter to rendered DOM
+  applyFilter();
+
+  renderIndex();
+
+  // FAB show/hide based on scroll
+  qs("#fab").style.display = "flex";
+  qs("#fabUp").onclick = () => scroll.scrollTo({ top:0, behavior:"smooth" });
+  qs("#fabDown").onclick = () => scroll.scrollTo({ top: scroll.scrollHeight, behavior:"smooth" });
+
+  // 디폴트: 가장 최근 메시지로 스크롤
+  requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
+
+  // Toggle "더 보기"
+  scroll.addEventListener("click", (e) => {
+    if (e.target.classList.contains("more-btn")) {
+      e.preventDefault();
+      const wrap = e.target.previousElementSibling;
+      const nowCollapsed = wrap.classList.toggle("collapsed");
+      e.target.innerHTML = nowCollapsed ? "▾ 더 보기..." : "▴ 접기";
+    }
+  });
+}
+
+function shouldCollapse(text) { return text && text.length > 320; }
+
+function renderTextMaybeCollapsed(text, isUser=false) {
+  const html = isUser ? escapeHtml(text) : renderMd(text);
+  if (!shouldCollapse(text)) return `<div class="text">${html}</div>`;
+  return `<div class="text collapsible collapsed">${html}</div><button class="more-btn">▾ 더 보기...</button>`;
+}
+
+function renderMsg(m) {
+  const role = m.role === "assistant" ? "Claude" : m.role === "user" ? "사용자" : m.role;
+  const time = fmtTime(m.ts);
+  const respTime = m._respMs ? ` · ⏱ ${fmtDur(Math.round(m._respMs/1000))}` : "";
+  const modelChip = m.role === "assistant" && m.model ? `<span class="model">${escapeHtml(m.model)} <span class="help">ⓘ</span></span>` : "";
+
+  let inner = "";
+  if (m.thinking && m.thinking.trim()) {
+    inner += `<details class="thinking"><summary>💭 사고 과정 (${m.thinking.length} chars)</summary><div class="body">${escapeHtml(m.thinking)}</div></details>`;
+  }
+  if (m.text && m.text.trim()) {
+    inner += `<div class="bubble">${renderTextMaybeCollapsed(m.text, m.role === "user")}</div>`;
+  }
+  if (m.tool_calls && m.tool_calls.length) {
+    for (const tc of m.tool_calls) {
+      const isErr = m.tool_result?.is_error && m.tool_result?.tool_use_id === tc.id;
+      const status = isErr ? '<span class="status err">✗ 실패</span>' : '<span class="status">✓ 완료</span>';
+      const inputStr = JSON.stringify(tc.input || {}, null, 2);
+      const cmd = tc.input?.command || tc.input?.file_path || tc.input?.pattern || tc.input?.url || tc.input?.prompt || "";
+      const resultBlock = m.tool_result && m.tool_result.tool_use_id === tc.id
+        ? `<div class="label" style="margin-top:14px">${isErr?'에러':'결과'}</div><pre class="codeblk wrap">${escapeHtml((m.tool_result.output || "").slice(0, 4000))}${(m.tool_result.output||"").length > 4000 ? "\n\n…[잘림]" : ""}</pre>`
+        : "";
+      const icon = tc.name === "Bash" ? "›_" : "🔧";
+      inner += `
+        <details class="toolcall">
+          <summary><span class="ic">${icon} ${escapeHtml(tc.name === "Bash" ? "터미널" : tc.name)}</span><span class="preview">${escapeHtml(String(cmd).slice(0, 200))}</span>${status}</summary>
+          <div class="body">
+            <div class="label">입력</div>
+            <pre class="codeblk wrap">${escapeHtml(inputStr.slice(0, 2000))}</pre>
+            ${resultBlock}
+          </div>
+        </details>`;
+    }
+  } else if (m.tool_result && !m.text) {
+    const isErr = m.tool_result.is_error;
+    inner += `<div class="tool-inline"><div class="head"><span class="ic">ℹ</span><span class="name">tool_result</span></div><div class="body">${escapeHtml((m.tool_result.output || "").slice(0,1500))}</div></div>`;
+  }
+  if (!inner) return "";
+
+  const isUser = m.role === "user";
+  return `
+    <div class="msg ${m.role}" id="msg-${m.seq}">
+      <div class="meta">
+        <span class="role">${role}</span>
+        <span class="dot">·</span>
+        <span>${time}${respTime}</span>
+        ${modelChip}
+      </div>
+      ${inner}
+    </div>`;
+}
+
+function renderIndex() {
+  qs("#index").innerHTML = visibleMessages.map((m, idx) => {
+    const tools = m.tool_calls?.map(t => t.name).join(", ");
+    const role = m.role === "assistant" ? "Claude" : m.role === "user" ? "사용자" : m.role;
+    let preview = m.text ? m.text.slice(0, 100) : (tools || (m.thinking ? "💭 사고 과정" : ""));
+    const cls = m.role === "user" ? "user" : (tools ? "tool assistant" : "assistant");
+    const icon = tools && !m.text ? '<span style="color:var(--tool);font-family:ui-monospace,monospace;font-size:11px">🔧</span>' : '';
+    return `
+      <div class="index-item ${cls}" data-seq="${m.seq}">
+        <div class="head"><div class="left"><span class="seq dot">#${idx+1}</span>${icon}</div><span class="time">${fmtTime(m.ts)}</span></div>
+        <div class="body"><b style="color:var(--fg);font-weight:500">${role}</b><br/>${escapeHtml(preview)}</div>
+      </div>`;
+  }).join("");
+  document.querySelectorAll("#index .index-item").forEach(el => {
+    el.addEventListener("click", () => {
+      document.querySelectorAll("#index .index-item").forEach(x => x.classList.remove("active"));
+      el.classList.add("active");
+      const target = qs(`#msg-${el.dataset.seq}`);
+      if (target) target.scrollIntoView({ behavior:"smooth", block:"center" });
+    });
+  });
+  qs("#msgsearch").oninput = (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll("#index .index-item").forEach(el => {
+      el.style.display = (!q || el.textContent.toLowerCase().includes(q)) ? "" : "none";
+    });
+  };
+}
+
+function applyFilter() {
+  document.querySelectorAll("#convBody .msg").forEach(el => {
+    const role = [...el.classList].find(c => c !== "msg" && c !== "user" && c !== "assistant" ? false : true) === "user" ? "user" : "assistant";
+    const isUser = el.classList.contains("user");
+    const hasTool = !!el.querySelector(".toolcall");
+    const hasThinking = !!el.querySelector("details.thinking");
+    const hasText = !!el.querySelector(".bubble .text");
+    const hasBash = !!el.querySelector('.toolcall summary .ic');  // any tool counts; bash is sub-detect
+    let show = true;
+    if (messageFilter === "user")            show = isUser;
+    else if (messageFilter === "assistant")  show = !isUser && hasText;
+    else if (messageFilter === "text")       show = hasText;
+    else if (messageFilter === "thinking")   show = hasThinking;
+    else if (messageFilter === "tool")       show = hasTool;
+    else if (messageFilter === "bash")       show = !!el.querySelector('.toolcall summary .ic');
+    el.style.display = show ? "" : "none";
+  });
+}
+
+function pushUrl() {
+  const p = new URLSearchParams();
+  if (selectedUser) p.set("user", selectedUser);
+  if (selectedSession) p.set("session", selectedSession);
+  history.replaceState(null, "", "/browse?" + p.toString());
+}
+
+async function openPlan(email) {
+  const modal = qs("#planModal"); modal.style.display = "flex";
+  const box = qs("#planContent"); box.innerHTML = "로딩…";
+  let d; try { d = await api(`/api/users/${encodeURIComponent(email)}/plan?days=30`); }
+  catch (e) { box.innerHTML = `<div style="color:var(--err)">에러: ${e.message}</div>`; return; }
+  const t = d.totals; const inf = d.inference;
+  const recommended = d.plans.find(p => p.id === inf.recommended_plan);
+  const tierColor = inf.tier === "헤비" ? "#ef4444" : inf.tier === "활발" ? "#f59e0b" : inf.tier === "정기" ? "#10b981" : "#7d8590";
+  box.innerHTML = `
+    <div style="margin-bottom:16px">
+      <div style="font-size:11px;color:var(--mute);text-transform:uppercase;letter-spacing:.05em">${email}</div>
+      <h2 style="margin:4px 0 0;font-size:18px">사용 플랜 분석 <span style="font-size:11px;background:${tierColor};color:#fff;padding:2px 8px;border-radius:999px;margin-left:6px;vertical-align:middle">${inf.tier}</span></h2>
+      <div style="color:var(--mute);font-size:12px;margin-top:4px">최근 ${d.days}일 기준</div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px">
+      <div style="background:var(--bg);padding:12px;border-radius:8px;border:1px solid var(--line)"><div style="font-size:10px;color:var(--mute);text-transform:uppercase">실제 비용</div><div style="font-size:20px;font-weight:700;color:var(--accent);margin-top:4px">$${t.cost_usd.toFixed(2)}</div></div>
+      <div style="background:var(--bg);padding:12px;border-radius:8px;border:1px solid var(--line)"><div style="font-size:10px;color:var(--mute);text-transform:uppercase">월 환산</div><div style="font-size:20px;font-weight:700;color:var(--accent);margin-top:4px">$${t.monthly_projected_usd.toFixed(0)}</div></div>
+      <div style="background:var(--bg);padding:12px;border-radius:8px;border:1px solid var(--line)"><div style="font-size:10px;color:var(--mute);text-transform:uppercase">활동일</div><div style="font-size:20px;font-weight:700;margin-top:4px">${t.active_days}/${d.days}</div></div>
+      <div style="background:var(--bg);padding:12px;border-radius:8px;border:1px solid var(--line)"><div style="font-size:10px;color:var(--mute);text-transform:uppercase">캐시 히트</div><div style="font-size:20px;font-weight:700;color:#10b981;margin-top:4px">${(t.cache_hit_rate*100).toFixed(0)}%</div></div>
+    </div>
+    <div style="background:var(--panel-2);border-left:3px solid var(--accent);padding:14px 16px;border-radius:6px;margin-bottom:18px">
+      <div style="font-size:11px;color:var(--mute);margin-bottom:4px">추천 플랜</div>
+      <div style="font-size:18px;font-weight:600">${recommended.name} <span style="color:var(--accent)">($${recommended.price_usd}/월)</span></div>
+      <div style="color:var(--mute);font-size:12px;margin-top:6px">${inf.reason}</div>
+      <div style="color:var(--mute);font-size:11px;margin-top:6px">Opus ${(inf.opus_share*100).toFixed(0)}% · Sonnet ${(inf.sonnet_share*100).toFixed(0)}%</div>
+    </div>
+    <h3 style="font-size:11px;color:var(--mute);text-transform:uppercase;margin:0 0 8px">모델 사용 분포</h3>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:18px;font-size:12px"><thead><tr style="color:var(--mute);font-size:10px;text-transform:uppercase"><th style="text-align:left;padding:6px;border-bottom:1px solid var(--line)">모델</th><th style="text-align:right;padding:6px;border-bottom:1px solid var(--line)">세션</th><th style="text-align:right;padding:6px;border-bottom:1px solid var(--line)">입력</th><th style="text-align:right;padding:6px;border-bottom:1px solid var(--line)">출력</th><th style="text-align:right;padding:6px;border-bottom:1px solid var(--line)">비용</th></tr></thead><tbody>${d.byModel.map(m => `<tr><td style="padding:6px;border-bottom:1px solid var(--line)">${m.model}</td><td style="text-align:right;padding:6px;border-bottom:1px solid var(--line)">${fmt(m.sessions)}</td><td style="text-align:right;padding:6px;border-bottom:1px solid var(--line)">${fmt(m.input_tokens)}</td><td style="text-align:right;padding:6px;border-bottom:1px solid var(--line)">${fmt(m.output_tokens)}</td><td style="text-align:right;padding:6px;border-bottom:1px solid var(--line);color:var(--accent)">$${m.cost_usd.toFixed(2)}</td></tr>`).join("")}</tbody></table>`;
+}
+
+loadUsers();
+</script>
+</body>
+</html>

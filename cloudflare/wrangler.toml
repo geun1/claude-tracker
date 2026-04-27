@@ -1,0 +1,50 @@
+name = "claude-tracker"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ENVIRONMENT = "production"
+RETENTION_DAYS = "365"
+# Treat the legacy shared TRACKER_TOKEN as admin (true) or just an unprivileged
+# token (false). Flip to false once everyone is on Access SSO or a per-user token.
+LEGACY_BEARER_ADMIN = "true"
+# PRICING is inline in src/pricing.ts; override per-env if your contract differs.
+
+# ── D1 (SQLite at the edge) ─────────────────────────────────────────────────
+# Create with: wrangler d1 create claude-tracker
+[[d1_databases]]
+binding = "DB"
+database_name = "claude-tracker"
+database_id = "e7438fd9-addd-428a-9778-316725cf7899"
+migrations_dir = "migrations"
+
+# ── R2 (large blob storage) ─────────────────────────────────────────────────
+# Create with: wrangler r2 bucket create claude-tracker-blobs
+[[r2_buckets]]
+binding = "BLOBS"
+bucket_name = "claude-tracker-blobs"
+
+# ── Static assets (dashboard + sessions HTML) ───────────────────────────────
+[assets]
+directory = "./public"
+binding = "ASSETS"
+# Run the Worker first so API routes like /sessions, /users, /teams take
+# precedence over similarly-named static files (sessions.html, users.html…).
+run_worker_first = true
+
+# ── Scheduled tasks (retention + masking sweep) ─────────────────────────────
+# Account is at the 5-cron limit; run retention manually via
+#   curl -X POST https://<worker>/api/admin/retention -H "Authorization: Bearer $TRACKER_TOKEN"
+# or wire to an external scheduler (GitHub Actions, etc.)
+# [triggers]
+# crons = ["0 4 * * *"]
+
+# ── Secrets (set via: wrangler secret put NAME) ─────────────────────────────
+# TRACKER_TOKEN          — shared bearer for legacy clients (optional)
+# CF_ACCESS_AUD          — Cloudflare Access Application Audience tag
+# CF_ACCESS_TEAM         — your-team.cloudflareaccess.com (no https://)
+# ADMIN_EMAILS           — comma-separated emails allowed to view all teams
+
+# ── Custom domain (in CF dashboard, easier than route here) ────────────────
+# Suggested: tracker.aptner.com (proxied=on, behind Access policy)

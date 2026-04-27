@@ -1,0 +1,14 @@
+services:
+  tracker:
+    build: .
+    container_name: claude-tracker
+    restart: unless-stopped
+    ports:
+      - "3737:3737"
+    environment:
+      TRACKER_TOKEN: ${TRACKER_TOKEN:-}
+      PRICING_FILE: /app/pricing.json
+    volumes:
+      - tracker-data:/data
+volumes:
+  tracker-data:
