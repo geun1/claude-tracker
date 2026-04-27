@@ -61,6 +61,7 @@
   .kpi .delta { display:inline-block; padding:2px 8px; border-radius:8px; font-size:11px; margin-left:6px; }
   .kpi .delta.up { background:#22c55e22; color:var(--good); }
   .kpi .delta.down { background:#ef444422; color:var(--bad); }
+  .kpi .delta.flat { background:#7d859022; color:var(--mute); }
 
   /* Heatmap */
   .heatmap-card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; }
@@ -123,6 +124,7 @@
 <body>
 <header>
   <h1>🟧 Claude Tracker <span class="pill" id="liveDot">서버 확인중</span></h1>
+  <span class="pill" id="meBox" style="display:none"></span>
   <div class="grow"></div>
   <select id="days">
     <option value="7">최근 7일</option>
@@ -257,6 +259,14 @@ async function api(path) {
   if (!r.ok) throw new Error(`HTTP ${r.status} on ${path}`);
   return r.json();
 }
+function withTokenRaw(path) {
+  const t = qs("#token").value.trim();
+  return t ? `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(t)}` : path;
+}
+function teamQuery() {
+  const team = qs("#teamFilter").value;
+  return team ? `team=${encodeURIComponent(team)}` : "";
+}
 async function apiYear(path) {
   // For heatmap — always 365 days regardless of UI period
   const params = new URLSearchParams(); params.set("days", "365");
@@ -274,8 +284,17 @@ async function load() {
     qs("#liveDot").className = "pill " + (h?.ok ? "live" : "");
     qs("#liveDot").textContent = h?.ok ? "Live" : "Server offline";
 
-    const [stats, ts365, users, teams, sessions] = await Promise.all([
+    // Show whoami in header
+    api("/api/me").then(me => {
+      const roleColor = me.role === "admin" ? "#fca5a5" : me.role === "manager" ? "#fcd34d" : "#86efac";
+      qs("#meBox").style.display = "inline-flex";
+      qs("#meBox").innerHTML = `👤 ${escapeHtml(me.name || me.email)}${me.team?` · ${escapeHtml(me.team)}`:""} · <span style="color:${roleColor};margin-left:4px">${me.role}</span>`;
+    }).catch(() => {});
+
+    const days = parseInt(qs("#days").value, 10);
+    const [stats, prevStats, ts365, users, teams, sessions] = await Promise.all([
       api("/stats"),
+      fetch(withTokenRaw(`/stats?days=${days*2}&${teamQuery()}`)).then(r => r.ok ? r.json() : null).catch(() => null),
       apiYear("/timeseries"),
       api("/users"),
       api("/teams"),
@@ -283,7 +302,7 @@ async function load() {
     ]);
 
     populateTeamFilter(teams);
-    renderKPIs(stats, sessions);
+    renderKPIs(stats, sessions, prevStats);
     renderHeatmap(ts365.rows || []);
     renderTeams(teams);
     renderUsers(users);
@@ -304,22 +323,29 @@ function populateTeamFilter(teams) {
   sel.value = cur;
 }
 
-function renderKPIs(stats, sessions) {
+function renderKPIs(stats, sessions, prevStats) {
   const t = stats.totals;
   const totalTok = (t.input_tokens||0) + (t.output_tokens||0);
-  // avg session duration
-  let totalDur = 0, msgCount = 0;
+  // avg session duration — exclude outliers (>24h) and cap at 4h to avoid skew from idle gaps
+  let totalDur = 0, durCount = 0, msgCount = 0;
   for (const s of sessions) {
     const d = (new Date(s.last_event) - new Date(s.started)) / 1000;
-    if (d > 0 && d < 86400) totalDur += d;
+    if (d > 0 && d < 86400) { totalDur += Math.min(d, 14400); durCount++; }
     msgCount += s.events || 0;
   }
-  const avgDur = sessions.length ? Math.round(totalDur / sessions.length) : 0;
+  const avgDur = durCount ? Math.round(totalDur / durCount) : 0;
+
+  // Trend: prev period covered days*2; subtract current to get prior
+  const prev = prevStats?.totals || null;
+  const prevCost = prev ? Math.max(0, (prev.cost_usd||0) - (t.cost_usd||0)) : null;
+  const prevSessions = prev ? Math.max(0, (prev.sessions||0) - (t.sessions||0)) : null;
+  const dCost = trendDelta(t.cost_usd||0, prevCost);
+  const dSess = trendDelta(t.sessions||0, prevSessions);
 
   qs("#kpis").innerHTML = `
     <div class="kpi">
       <div class="label">총 비용</div>
-      <div class="num" style="color:#fb923c">${fmtUSD(t.cost_usd)}</div>
+      <div class="num" style="color:#fb923c">${fmtUSD(t.cost_usd)} <span class="delta ${dCost.cls}">${dCost.text}</span></div>
       <div class="sub">${stats.byModel.length}개 모델 · 입출력 ${fmt(totalTok)} 토큰</div>
     </div>
     <div class="kpi">
@@ -329,7 +355,7 @@ function renderKPIs(stats, sessions) {
     </div>
     <div class="kpi">
       <div class="label">세션 수</div>
-      <div class="num">${fmt(t.sessions)}</div>
+      <div class="num">${fmt(t.sessions)} <span class="delta ${dSess.cls}">${dSess.text}</span></div>
       <div class="sub">메시지 ${fmt(msgCount)}개</div>
     </div>
     <div class="kpi">
@@ -338,6 +364,15 @@ function renderKPIs(stats, sessions) {
       <div class="sub">${avgDur ? Math.round(msgCount / Math.max(1, sessions.length)) + " 메시지/세션" : "—"}</div>
     </div>
   `;
+}
+
+function trendDelta(now, prev) {
+  if (prev == null || prev === 0) return { cls:"flat", text:"" };
+  const pct = ((now - prev) / prev) * 100;
+  if (Math.abs(pct) < 1) return { cls:"flat", text:"±0%" };
+  const cls = pct > 0 ? "up" : "down";
+  const arrow = pct > 0 ? "▲" : "▼";
+  return { cls, text: `${arrow}${Math.abs(pct).toFixed(0)}%` };
 }
 
 function renderHeatmap(rows) {
@@ -413,7 +448,7 @@ function renderTeams(teams) {
 function renderUsers(users) {
   qs("#userCount").textContent = users.length;
   qs("#userTable tbody").innerHTML = users.length ? users.slice(0, 12).map(u => `
-    <tr>
+    <tr onclick="location.href='/u/${encodeURIComponent(u.user_email)}'">
       <td class="name">
         ${escapeHtml(u.user_name || u.user_email)}
         <div style="color:var(--dim);font-size:10.5px;margin-top:1px">${escapeHtml(u.user_email)}</div>
@@ -440,13 +475,17 @@ function renderTools(byTool) {
 
 function renderSessionMetrics(sessions, stats) {
   const totals = stats.totals;
-  let totalDur = 0, totalMsg = 0, longest = 0;
+  let totalDur = 0, totalMsg = 0, longest = 0, durCount = 0;
   for (const s of sessions) {
     const d = (new Date(s.last_event) - new Date(s.started)) / 1000;
-    if (d > 0 && d < 86400) { totalDur += d; if (d > longest) longest = d; }
+    if (d > 0 && d < 86400) {
+      totalDur += Math.min(d, 14400);  // cap 4h to match KPI calc
+      if (d > longest) longest = d;
+      durCount++;
+    }
     totalMsg += s.events || 0;
   }
-  const avgDur = sessions.length ? Math.round(totalDur / sessions.length) : 0;
+  const avgDur = durCount ? Math.round(totalDur / durCount) : 0;
   const avgMsg = sessions.length ? Math.round(totalMsg / sessions.length) : 0;
   const avgTok = sessions.length ? Math.round(((totals.input_tokens||0) + (totals.output_tokens||0)) / sessions.length) : 0;
 

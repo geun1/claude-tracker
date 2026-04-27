@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Claude Tracker · 사용자 프로필</title>
+<style>
+  :root { color-scheme: dark; --bg:#0a0d12; --panel:#11151b; --panel-2:#161b22; --line:#1c222b; --line-2:#262d38; --fg:#e6edf3; --mute:#7d8590; --dim:#5e6673; --accent:#3b82f6; --accent-soft:#1e3a8a44; --good:#22c55e; --warn:#f59e0b; --bad:#ef4444; --hm-0:#161b22; --hm-1:#0e4429; --hm-2:#006d32; --hm-3:#26a641; --hm-4:#39d353; }
+  * { box-sizing: border-box }
+  html, body { margin:0; padding:0; }
+  body { font: 13.5px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro","Pretendard",Inter,system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb { background:#262d38; border-radius:5px; border:2px solid var(--bg); }
+
+  header { display:flex; align-items:center; gap:14px; padding:16px 28px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { margin:0; font-size:14px; font-weight:600; display:flex; align-items:center; gap:10px; }
+  header .crumb { color:var(--mute); font-weight:400; }
+  header a.btn { background:var(--panel-2); border:1px solid var(--line); color:var(--fg); padding:6px 12px; border-radius:8px; font-size:12.5px; text-decoration:none; }
+  header a.btn:hover { background:#1c232f; }
+  header .grow { flex:1 }
+  header select { background:var(--panel-2); color:var(--fg); border:1px solid var(--line); padding:6px 12px; border-radius:8px; font-size:12.5px; }
+
+  main { padding:28px; max-width:1400px; margin:0 auto; }
+  .section { margin-bottom:32px; }
+  .section h2 { font-size:14px; font-weight:600; margin:0 0 14px; }
+
+  .profile-head { display:flex; align-items:center; gap:20px; margin-bottom:24px; }
+  .avatar { width:72px; height:72px; border-radius:50%; background:linear-gradient(135deg, var(--accent), #818cf8); display:flex; align-items:center; justify-content:center; font-size:30px; font-weight:600; color:#fff; flex-shrink:0; }
+  .profile-head .info .name { font-size:22px; font-weight:700; }
+  .profile-head .info .meta { color:var(--mute); margin-top:4px; font-size:13px; }
+  .pill { display:inline-block; background:var(--panel-2); color:var(--mute); padding:2px 10px; border-radius:12px; font-size:11px; }
+  .pill.team { background:var(--accent-soft); color:#93c5fd; }
+  .pill.role-admin { background:#dc262644; color:#fca5a5; }
+  .pill.role-manager { background:#f59e0b44; color:#fcd34d; }
+  .pill.role-general { background:#22c55e44; color:#86efac; }
+
+  .kpis { display:grid; grid-template-columns:repeat(4, 1fr); gap:16px; margin-bottom:24px; }
+  .kpi { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; }
+  .kpi .label { font-size:11px; color:var(--mute); text-transform:uppercase; letter-spacing:.06em; }
+  .kpi .num { font-size:28px; font-weight:700; margin-top:6px; font-variant-numeric:tabular-nums; }
+  .kpi .sub { font-size:12px; color:var(--mute); margin-top:6px; }
+  .kpi .delta { display:inline-block; padding:2px 8px; border-radius:8px; font-size:11px; margin-left:4px; vertical-align:middle; }
+  .kpi .delta.up { background:#22c55e22; color:var(--good); }
+  .kpi .delta.down { background:#ef444422; color:var(--bad); }
+  .kpi .delta.flat { background:#7d859022; color:var(--mute); }
+
+  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; }
+  .card .title { font-size:13px; font-weight:500; margin-bottom:14px; display:flex; justify-content:space-between; align-items:center; }
+  .card .title .badge { background:var(--panel-2); color:var(--mute); padding:2px 9px; border-radius:10px; font-size:10.5px; }
+
+  /* Daily trend chart */
+  #trendChart { width:100%; height:180px; }
+
+  /* Heatmap */
+  .heatmap-grid { display:grid; grid-auto-flow:column; grid-template-rows:repeat(7, 11px); gap:3px; overflow-x:auto; padding-bottom:8px; }
+  .heatmap-grid .cell { width:11px; height:11px; border-radius:2px; background:var(--hm-0); }
+
+  /* Tools */
+  .tools-list { display:flex; flex-direction:column; gap:8px; }
+  .tool-row { display:grid; grid-template-columns:90px 1fr 60px; align-items:center; gap:12px; font-size:12.5px; }
+  .tool-row .name { font-family: ui-monospace, monospace; }
+  .tool-row .bar { height:8px; background:var(--panel-2); border-radius:4px; overflow:hidden; }
+  .tool-row .bar > div { height:100%; background:linear-gradient(90deg, var(--accent), #818cf8); border-radius:4px; }
+  .tool-row .count { text-align:right; color:var(--mute); }
+
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  thead th { text-align:left; color:var(--mute); font-weight:500; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; padding:8px 10px; border-bottom:1px solid var(--line); }
+  thead th.num { text-align:right; }
+  tbody td { padding:10px; border-bottom:1px solid var(--line); font-size:12.5px; }
+  tbody td.num { text-align:right; }
+  tbody tr:hover td { background:#161b22; cursor:pointer; }
+
+  .empty { color:var(--mute); padding:40px; text-align:center; font-size:13px; }
+  .err { color:var(--bad); padding:14px; border:1px solid #ef444444; background:#ef444411; border-radius:10px; }
+
+  /* Plan card */
+  .plan-card { background:linear-gradient(135deg, #1e3a8a22, #11151b); border:1px solid var(--accent); border-radius:14px; padding:20px; }
+  .plan-card .recommended { font-size:10px; text-transform:uppercase; color:var(--accent); letter-spacing:.08em; }
+  .plan-card .name { font-size:20px; font-weight:700; margin-top:4px; }
+  .plan-card .price { font-size:28px; color:var(--accent); font-weight:700; margin-top:8px; }
+  .plan-card .price small { font-size:14px; color:var(--mute); font-weight:400; }
+  .plan-card .reason { font-size:12px; color:var(--mute); margin-top:8px; line-height:1.5; }
+
+  @media (max-width: 900px) {
+    .kpis { grid-template-columns:repeat(2, 1fr); }
+    .grid-2 { grid-template-columns:1fr; }
+    main, header { padding:18px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>🟧 Claude Tracker <span class="crumb"> / 사용자 / <span id="crumbName">…</span></span></h1>
+  <div class="grow"></div>
+  <select id="days">
+    <option value="7">7일</option>
+    <option value="14">14일</option>
+    <option value="30" selected>30일</option>
+    <option value="90">90일</option>
+    <option value="365">365일</option>
+  </select>
+  <a class="btn" href="/">← 대시보드</a>
+  <a class="btn" id="sessionLink" href="#">세션 보기 →</a>
+</header>
+
+<main id="main"><div class="empty">불러오는 중...</div></main>
+
+<script>
+const qs = (s) => document.querySelector(s);
+const fmt = (n) => Number(n||0).toLocaleString();
+const fmtUSD = (n) => "$" + Number(n||0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtKST = (s) => { if (!s) return "—"; const d = new Date(s); return new Intl.DateTimeFormat("ko-KR", { timeZone:"Asia/Seoul", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", hour12:false }).format(d); };
+const fmtDur = (s) => { if (!s || s < 0) return "—"; if (s < 60) return s+"s"; if (s < 3600) return Math.floor(s/60)+"m "+(s%60)+"s"; return Math.floor(s/3600)+"h "+Math.floor((s%3600)/60)+"m"; };
+const escapeHtml = (s) => (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const tokenKey = "claude-tracker-token";
+const _urlTok = new URLSearchParams(location.search).get("token");
+if (_urlTok) { localStorage.setItem(tokenKey, _urlTok); }
+
+const email = decodeURIComponent(location.pathname.split("/").pop() || "");
+qs("#crumbName").textContent = email;
+qs("#sessionLink").href = `/browse?user=${encodeURIComponent(email)}`;
+qs("#days").addEventListener("change", load);
+
+function withToken(p) { const t = localStorage.getItem(tokenKey); return t ? p + (p.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(t) : p; }
+async function api(p) { const r = await fetch(withToken(p)); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }
+
+// Session active duration: cap at 60min, exclude sessions > 24h
+function activeDuration(s) {
+  const d = (new Date(s.last_event) - new Date(s.started)) / 1000;
+  if (d < 0 || d > 86400) return null;       // exclude weird outliers
+  return Math.min(d, 3600 * 4);              // cap at 4h
+}
+
+function delta(now, prev) {
+  if (!prev) return { sign:"flat", text:"신규" };
+  const pct = ((now - prev) / Math.max(1, prev)) * 100;
+  if (Math.abs(pct) < 1) return { sign:"flat", text:"±0%" };
+  const sign = pct > 0 ? "up" : "down";
+  return { sign, text: (pct > 0 ? "▲" : "▼") + Math.abs(pct).toFixed(0) + "%" };
+}
+
+async function load() {
+  const days = parseInt(qs("#days").value, 10);
+  try {
+    const [sessions, plan, ts365, allSessions] = await Promise.all([
+      api(`/sessions?user=${encodeURIComponent(email)}&limit=300&days=${days}`),
+      api(`/api/users/${encodeURIComponent(email)}/plan?days=${days}`),
+      api(`/timeseries?days=${days}&user=${encodeURIComponent(email)}`),
+      api(`/sessions?user=${encodeURIComponent(email)}&limit=500`),  // for heatmap
+    ]);
+
+    // Compute aggregates
+    let totalCost = 0, totalTok = 0, totalMsg = 0, totalDur = 0, durCount = 0;
+    for (const s of sessions) {
+      totalCost += s.cost_usd || 0;
+      totalTok += (s.input_tokens||0) + (s.output_tokens||0);
+      totalMsg += s.events || 0;
+      const d = activeDuration(s);
+      if (d != null) { totalDur += d; durCount++; }
+    }
+    const avgDur = durCount ? Math.round(totalDur / durCount) : 0;
+    const avgMsg = sessions.length ? Math.round(totalMsg / sessions.length) : 0;
+
+    // Previous period for trend
+    let prevCost = 0, prevSessions = 0;
+    try {
+      const prevStats = await api(`/stats?user=${encodeURIComponent(email)}&days=${days*2}`);
+      prevCost = (prevStats.totals.cost_usd || 0) - totalCost;
+      prevSessions = (prevStats.totals.sessions || 0) - sessions.length;
+    } catch {}
+
+    const role = plan.email; // not actually role, but plan response
+    const meta = sessions[0] || {};
+    const userName = meta.user_email ? (meta.user_email === email ? email : email) : email;
+
+    const dCost = delta(totalCost, prevCost);
+    const dSess = delta(sessions.length, prevSessions);
+
+    qs("#main").innerHTML = `
+      <div class="profile-head">
+        <div class="avatar">${escapeHtml((email[0] || "?").toUpperCase())}</div>
+        <div class="info">
+          <div class="name">${escapeHtml(email)}</div>
+          <div class="meta">
+            ${meta.team ? `<span class="pill team">${escapeHtml(meta.team)}</span>` : ""}
+            ${plan.inference?.tier ? `<span class="pill">${plan.inference.tier} 사용자</span>` : ""}
+            <span style="margin-left:8px">${days}일 통계</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="kpis">
+        <div class="kpi">
+          <div class="label">총 비용</div>
+          <div class="num" style="color:#fb923c">${fmtUSD(totalCost)} <span class="delta ${dCost.sign}">${dCost.text}</span></div>
+          <div class="sub">월 환산 ${fmtUSD((totalCost/days)*30)}</div>
+        </div>
+        <div class="kpi">
+          <div class="label">세션 수</div>
+          <div class="num">${fmt(sessions.length)} <span class="delta ${dSess.sign}">${dSess.text}</span></div>
+          <div class="sub">메시지 ${fmt(totalMsg)}개</div>
+        </div>
+        <div class="kpi">
+          <div class="label">평균 세션 시간</div>
+          <div class="num">${fmtDur(avgDur)}</div>
+          <div class="sub">평균 ${avgMsg} 메시지/세션</div>
+        </div>
+        <div class="kpi">
+          <div class="label">활동일</div>
+          <div class="num">${plan.totals.active_days || 0}<span style="font-size:14px;color:var(--mute)"> / ${days}일</span></div>
+          <div class="sub">캐시 히트율 ${((plan.totals.cache_hit_rate||0)*100).toFixed(0)}%</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="card">
+          <div class="title">일별 토큰 추이</div>
+          <canvas id="trendChart"></canvas>
+        </div>
+      </div>
+
+      <div class="section grid-2">
+        <div class="card">
+          <div class="title">사용한 도구 TOP <span class="badge">${plan.byModel.length} 모델</span></div>
+          <div class="tools-list" id="toolsList">불러오는 중...</div>
+        </div>
+
+        <div class="plan-card">
+          <div class="recommended">★ 추천 플랜</div>
+          <div class="name">${plan.plans.find(p => p.id === plan.inference.recommended_plan)?.name || "—"}</div>
+          <div class="price">$${plan.plans.find(p => p.id === plan.inference.recommended_plan)?.price_usd || 0}<small>/월</small></div>
+          <div class="reason">${plan.inference.reason}</div>
+          <div style="margin-top:14px;display:flex;gap:10px;font-size:11px;color:var(--mute)">
+            Opus ${(plan.inference.opus_share*100).toFixed(0)}% ·
+            Sonnet ${(plan.inference.sonnet_share*100).toFixed(0)}%
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="card">
+          <div class="title">모델별 사용</div>
+          <table>
+            <thead><tr><th>모델</th><th class="num">세션</th><th class="num">입력</th><th class="num">출력</th><th class="num">비용</th></tr></thead>
+            <tbody>${plan.byModel.map(m => `
+              <tr>
+                <td style="font-family:ui-monospace,monospace">${escapeHtml(m.model)}</td>
+                <td class="num">${fmt(m.sessions)}</td>
+                <td class="num">${fmt(m.input_tokens)}</td>
+                <td class="num">${fmt(m.output_tokens)}</td>
+                <td class="num" style="color:#fb923c">${fmtUSD(m.cost_usd)}</td>
+              </tr>`).join("")}</tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="card">
+          <div class="title">최근 세션 <span class="badge">${sessions.length}</span></div>
+          <table>
+            <thead><tr><th>시작</th><th>모델</th><th class="num">메시지</th><th class="num">시간</th><th class="num">토큰</th><th class="num">비용</th></tr></thead>
+            <tbody>${sessions.slice(0, 30).map(s => {
+              const d = activeDuration(s);
+              return `<tr onclick="location.href='/browse?user=${encodeURIComponent(email)}&session=${s.session_id}'">
+                <td>${fmtKST(s.started)}</td>
+                <td style="font-family:ui-monospace,monospace;font-size:11px;color:var(--mute)">${escapeHtml((s.model||"—").replace("claude-",""))}</td>
+                <td class="num">${fmt(s.events)}</td>
+                <td class="num">${fmtDur(d)}</td>
+                <td class="num">${fmt((s.input_tokens||0)+(s.output_tokens||0))}</td>
+                <td class="num">${fmtUSD(s.cost_usd)}</td>
+              </tr>`;
+            }).join("")}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    // Render trend chart
+    drawTrend(ts365.rows || []);
+    // Tools — fetch from /stats (filtered by user)
+    api(`/stats?days=${days}&user=${encodeURIComponent(email)}`).then(s => {
+      const max = Math.max(...(s.byTool || []).map(x => x.n), 1);
+      qs("#toolsList").innerHTML = (s.byTool || []).slice(0, 10).map(x => `
+        <div class="tool-row">
+          <span class="name">${escapeHtml(x.tool_name)}</span>
+          <div class="bar"><div style="width:${(x.n / max * 100).toFixed(1)}%"></div></div>
+          <span class="count">${fmt(x.n)}</span>
+        </div>
+      `).join("") || '<div class="empty">데이터 없음</div>';
+    }).catch(() => qs("#toolsList").innerHTML = '<div class="empty">데이터 없음</div>');
+  } catch (e) {
+    qs("#main").innerHTML = `<div class="err">⚠ ${e.message}\n${e.stack || ""}</div>`;
+    console.error("profile load failed:", e);
+  }
+}
+window.addEventListener("error", (e) => {
+  qs("#main").innerHTML = `<div class="err">JS error: ${e.message}\n  ${e.filename}:${e.lineno}</div>`;
+});
+window.addEventListener("unhandledrejection", (e) => {
+  qs("#main").innerHTML = `<div class="err">Promise rejection: ${e.reason}</div>`;
+});
+
+function drawTrend(rows) {
+  const c = qs("#trendChart"); if (!c) return;
+  const ctx = c.getContext("2d");
+  const W = c.width = c.offsetWidth * 2;
+  const H = c.height = 180 * 2;
+  ctx.scale(2, 2);
+  if (!rows.length) { ctx.fillStyle = "#7d8590"; ctx.fillText("데이터 없음", 20, 90); return; }
+  const w = c.offsetWidth, h = 180;
+  const max = Math.max(...rows.map(r => (r.input_tokens||0) + (r.output_tokens||0))) || 1;
+  const bw = w / rows.length;
+  rows.forEach((r, i) => {
+    const v = (r.input_tokens||0) + (r.output_tokens||0);
+    const bh = (v / max) * (h - 30);
+    ctx.fillStyle = "#3b82f6"; ctx.fillRect(i*bw + 2, h - bh - 20, bw - 4, bh);
+  });
+  // x-axis labels
+  ctx.fillStyle = "#7d8590"; ctx.font = "10px system-ui";
+  rows.forEach((r, i) => {
+    if (i % Math.ceil(rows.length/8) === 0 || i === rows.length-1) {
+      ctx.fillText(r.day.slice(5), i*bw + 2, h - 6);
+    }
+  });
+}
+
+load();
+</script>
+</body>
+</html>

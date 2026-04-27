@@ -33,8 +33,10 @@ const app = new Hono<{ Bindings: Env; Variables: { actor: Actor } }>();
 // ── Static dashboard ───────────────────────────────────────────────────────
 app.get("/", (c) => c.env.ASSETS.fetch(new Request(new URL("/dashboard.html", c.req.url))));
 app.get("/browse", (c) => c.env.ASSETS.fetch(new Request(new URL("/sessions.html", c.req.url))));
+app.get("/u/:email", (c) => c.env.ASSETS.fetch(new Request(new URL("/profile.html", c.req.url))));
 app.get("/dashboard.html", (c) => c.env.ASSETS.fetch(c.req.raw));
 app.get("/sessions.html", (c) => c.env.ASSETS.fetch(c.req.raw));
+app.get("/profile.html", (c) => c.env.ASSETS.fetch(c.req.raw));
 app.get("/health", (c) => c.json({ ok: true, environment: (c.env as any).ENVIRONMENT || "unknown" }));
 
 // ── Auth middleware (skip for static) ──────────────────────────────────────

@@ -196,6 +196,7 @@
   <button class="icon-btn" id="togSessions" title="세션 (2)">📋</button>
   <button class="icon-btn" id="togIndex" title="메시지 (3)">📑</button>
   <a class="icon-btn" href="/">📊</a>
+  <button class="icon-btn" id="copyMd" title="이 세션을 마크다운으로 복사" disabled>📋 MD</button>
 </header>
 
 <div class="layout">
@@ -478,6 +479,10 @@ async function loadDetail() {
   qs("#fabUp").onclick = () => scroll.scrollTo({ top:0, behavior:"smooth" });
   qs("#fabDown").onclick = () => scroll.scrollTo({ top: scroll.scrollHeight, behavior:"smooth" });
 
+  // 마크다운 복사 활성화
+  qs("#copyMd").disabled = false;
+  qs("#copyMd").onclick = () => copySessionAsMarkdown(s, visibleMessages);
+
   // 디폴트: 가장 최근 메시지로 스크롤
   requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
 
@@ -605,6 +610,58 @@ function pushUrl() {
   if (selectedUser) p.set("user", selectedUser);
   if (selectedSession) p.set("session", selectedSession);
   history.replaceState(null, "", "/browse?" + p.toString());
+}
+
+function copySessionAsMarkdown(head, msgs) {
+  const lines = [];
+  lines.push(`# Claude Code 세션 · ${head.session_id || ""}`);
+  lines.push("");
+  lines.push(`- **사용자**: ${head.user_name || head.user_email || "—"}${head.team ? ` (${head.team})` : ""}`);
+  lines.push(`- **모델**: ${head.model || "—"}`);
+  lines.push(`- **cwd**: \`${head.cwd || "—"}\``);
+  lines.push(`- **시간**: ${fmtTime(head.started)} → ${fmtTime(head.last_event)}`);
+  lines.push(`- **메시지**: ${msgs.length}개  ·  **비용**: $${(head.cost_usd || 0).toFixed(4)}`);
+  lines.push("");
+  lines.push("---");
+  for (const m of msgs) {
+    const role = m.role === "assistant" ? "Claude" : m.role === "user" ? "사용자" : m.role;
+    lines.push("");
+    lines.push(`## ${role} — ${fmtTime(m.ts)}`);
+    if (m.thinking && m.thinking.trim()) {
+      lines.push("");
+      lines.push("> 💭 사고 과정");
+      lines.push("> ");
+      for (const t of m.thinking.split("\n").slice(0, 30)) lines.push("> " + t);
+    }
+    if (m.text && m.text.trim()) {
+      lines.push("");
+      lines.push(m.text);
+    }
+    if (m.tool_calls?.length) {
+      for (const tc of m.tool_calls) {
+        lines.push("");
+        lines.push(`**🔧 ${tc.name}**`);
+        lines.push("```json");
+        lines.push(JSON.stringify(tc.input || {}, null, 2));
+        lines.push("```");
+        if (m.tool_result?.tool_use_id === tc.id) {
+          lines.push("");
+          lines.push(m.tool_result.is_error ? "**❌ 에러**" : "**결과**");
+          lines.push("```");
+          lines.push((m.tool_result.output || "").slice(0, 2000));
+          lines.push("```");
+        }
+      }
+    }
+  }
+  const md = lines.join("\n");
+  navigator.clipboard.writeText(md).then(() => {
+    const btn = qs("#copyMd");
+    const orig = btn.textContent;
+    btn.textContent = "✓ 복사됨!";
+    btn.style.background = "var(--asst)";
+    setTimeout(() => { btn.textContent = orig; btn.style.background = ""; }, 1500);
+  });
 }
 
 async function openPlan(email) {
