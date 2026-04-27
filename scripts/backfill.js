@@ -49,15 +49,25 @@ function postRaw(url, body) {
 
 async function batch(url, items, concurrency, wrap = (x) => x) {
   let i = 0, ok = 0, fail = 0;
+  const total = items.length;
+  const start = Date.now();
+  const label = url.split("/").pop();
+  const tick = setInterval(() => {
+    const pct = Math.round((i / Math.max(1,total)) * 100);
+    const elapsed = Math.round((Date.now() - start) / 1000);
+    const rate = i / Math.max(1, elapsed);
+    const eta = rate > 0 ? Math.round((total - i) / rate) : 0;
+    process.stdout.write(`  ${label} ${i}/${total} (${pct}%, ok=${ok} fail=${fail}, ${elapsed}s elapsed, ~${eta}s remaining)\n`);
+  }, 5000);
   async function worker() {
     while (i < items.length) {
       const me = i++;
       const code = await postRaw(url, wrap(items[me]));
       if (code && code < 300) ok++; else fail++;
-      if (me % 200 === 0) process.stdout.write(`  ${url.split("/").pop()} ${me}/${items.length}\r`);
     }
   }
-  await Promise.all(Array.from({ length: concurrency }, worker));
+  try { await Promise.all(Array.from({ length: concurrency }, worker)); } finally { clearInterval(tick); }
+  process.stdout.write(`  ${label} done: ${total}/${total} ok=${ok} fail=${fail} in ${Math.round((Date.now()-start)/1000)}s\n`);
   return { ok, fail };
 }
 
