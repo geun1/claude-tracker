@@ -70,7 +70,8 @@
   .heatmap-card .head .legend { display:flex; align-items:center; gap:6px; color:var(--mute); font-size:11px; }
   .heatmap-card .head .legend .cells { display:flex; gap:3px; margin:0 6px; }
   .heatmap-card .head .legend .cell { width:11px; height:11px; border-radius:2px; }
-  .heatmap-grid { display:grid; grid-auto-flow:column; grid-template-rows:repeat(7, 11px); gap:3px; overflow-x:auto; padding-bottom:8px; }
+  .heatmap-grid { display:grid; grid-auto-flow:column; grid-template-rows:repeat(7, 11px); gap:3px; overflow-x:auto; padding-bottom:8px; scroll-snap-type:x proximity; }
+  .heatmap-grid::-webkit-scrollbar { height:6px; }
   .heatmap-grid .cell { width:11px; height:11px; border-radius:2px; background:var(--hm-0); }
   .heatmap-grid .cell:hover { outline:1px solid var(--accent); outline-offset:1px; }
   .heatmap-grid .month-label { grid-row:1; font-size:10px; color:var(--mute); white-space:nowrap; }
@@ -134,9 +135,10 @@
     <option value="365">최근 365일</option>
   </select>
   <select id="teamFilter"><option value="">전체 팀</option></select>
-  <input id="token" placeholder="토큰" size="14" />
+  <input id="token" placeholder="토큰" size="14" style="display:none" />
   <a class="btn" href="/browse">세션 뷰어 →</a>
   <a class="btn" id="csvLink" href="#">CSV ↓</a>
+  <button class="btn" id="accountBtn" title="계정 설정">⚙</button>
 </header>
 
 <main>
@@ -420,6 +422,8 @@ function renderHeatmap(rows) {
     el.title = `${c.iso} · ${fmt(c.v)} 토큰`;
     grid.appendChild(el);
   }
+  // Auto-scroll to today on small screens
+  requestAnimationFrame(() => { grid.scrollLeft = grid.scrollWidth; });
   qs("#heatmapTotalDays").textContent = `(지난 365일 · 활동일 ${activeDays}일 · 최고 연속 ${bestStreak}일)`;
   qs("#heatmapSummary").innerHTML = `
     <span><b>${fmt(activeDays)}</b>일 활동</span>
@@ -544,6 +548,41 @@ function renderSessionsTable(sessions) {
 }
 
 function escapeHtml(s) { return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+// Account modal (token management)
+qs("#accountBtn").addEventListener("click", openAccount);
+function openAccount() {
+  const cur = localStorage.getItem(tokenKey) || "";
+  const masked = cur ? cur.slice(0,8) + "…" + cur.slice(-4) : "(없음)";
+  const modal = document.createElement("div");
+  modal.style.cssText = "position:fixed;inset:0;background:#000a;z-index:50;display:flex;align-items:center;justify-content:center";
+  modal.innerHTML = `
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:24px;max-width:480px;width:90%">
+      <h3 style="margin:0 0 12px;font-size:15px">계정 설정</h3>
+      <div style="background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:14px;font-family:ui-monospace,monospace;font-size:11px;display:flex;gap:8px;align-items:center">
+        <span id="tokView" style="flex:1;word-break:break-all">${masked}</span>
+        <button class="btn" id="tokReveal">👁</button>
+        <button class="btn" id="tokCopy">📋</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn" id="acctSwitch">다른 토큰으로 전환</button>
+        <button class="btn" id="acctLogout" style="color:var(--bad)">로그아웃</button>
+        <button class="btn" id="acctClose" style="margin-left:auto">닫기</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener("click", e => { if (e.target === modal) modal.remove(); });
+  modal.querySelector("#tokReveal").onclick = () => modal.querySelector("#tokView").textContent = cur || "";
+  modal.querySelector("#tokCopy").onclick = () => { navigator.clipboard.writeText(cur || ""); modal.querySelector("#tokCopy").textContent = "✓"; };
+  modal.querySelector("#acctSwitch").onclick = () => {
+    const t = prompt("새 토큰 입력:");
+    if (t) { localStorage.setItem(tokenKey, t.trim()); location.reload(); }
+  };
+  modal.querySelector("#acctLogout").onclick = () => {
+    if (confirm("로그아웃하시겠습니까?")) { localStorage.removeItem(tokenKey); location.reload(); }
+  };
+  modal.querySelector("#acctClose").onclick = () => modal.remove();
+}
 
 load();
 </script>

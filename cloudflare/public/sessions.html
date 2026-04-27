@@ -197,6 +197,7 @@
   <button class="icon-btn" id="togIndex" title="메시지 (3)">📑</button>
   <a class="icon-btn" href="/">📊</a>
   <button class="icon-btn" id="copyMd" title="이 세션을 마크다운으로 복사" disabled>📋 MD</button>
+  <button class="icon-btn" id="accountBtn" title="계정 설정">⚙</button>
 </header>
 
 <div class="layout">
@@ -693,6 +694,31 @@ async function openPlan(email) {
     <h3 style="font-size:11px;color:var(--mute);text-transform:uppercase;margin:0 0 8px">모델 사용 분포</h3>
     <table style="width:100%;border-collapse:collapse;margin-bottom:18px;font-size:12px"><thead><tr style="color:var(--mute);font-size:10px;text-transform:uppercase"><th style="text-align:left;padding:6px;border-bottom:1px solid var(--line)">모델</th><th style="text-align:right;padding:6px;border-bottom:1px solid var(--line)">세션</th><th style="text-align:right;padding:6px;border-bottom:1px solid var(--line)">입력</th><th style="text-align:right;padding:6px;border-bottom:1px solid var(--line)">출력</th><th style="text-align:right;padding:6px;border-bottom:1px solid var(--line)">비용</th></tr></thead><tbody>${d.byModel.map(m => `<tr><td style="padding:6px;border-bottom:1px solid var(--line)">${m.model}</td><td style="text-align:right;padding:6px;border-bottom:1px solid var(--line)">${fmt(m.sessions)}</td><td style="text-align:right;padding:6px;border-bottom:1px solid var(--line)">${fmt(m.input_tokens)}</td><td style="text-align:right;padding:6px;border-bottom:1px solid var(--line)">${fmt(m.output_tokens)}</td><td style="text-align:right;padding:6px;border-bottom:1px solid var(--line);color:var(--accent)">$${m.cost_usd.toFixed(2)}</td></tr>`).join("")}</tbody></table>`;
 }
+
+qs("#accountBtn").addEventListener("click", () => {
+  const cur = localStorage.getItem(tokenKey) || "";
+  const masked = cur ? cur.slice(0,8) + "…" + cur.slice(-4) : "(없음)";
+  const modal = document.createElement("div");
+  modal.style.cssText = "position:fixed;inset:0;background:#000a;z-index:50;display:flex;align-items:center;justify-content:center";
+  modal.innerHTML = `<div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:24px;max-width:480px;width:90%">
+    <h3 style="margin:0 0 12px;font-size:15px">계정 설정</h3>
+    <div style="background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:14px;font-family:ui-monospace,monospace;font-size:11px;display:flex;gap:8px;align-items:center">
+      <span id="tv" style="flex:1;word-break:break-all">${masked}</span>
+      <button class="icon-btn" id="tr">👁</button><button class="icon-btn" id="tc">📋</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="icon-btn" id="sw">다른 토큰으로 전환</button>
+      <button class="icon-btn" id="lo" style="color:var(--err)">로그아웃</button>
+      <button class="icon-btn" id="cl" style="margin-left:auto">닫기</button>
+    </div></div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener("click", e => { if (e.target === modal) modal.remove(); });
+  modal.querySelector("#tr").onclick = () => modal.querySelector("#tv").textContent = cur;
+  modal.querySelector("#tc").onclick = () => { navigator.clipboard.writeText(cur); modal.querySelector("#tc").textContent="✓"; };
+  modal.querySelector("#sw").onclick = () => { const t = prompt("새 토큰:"); if (t) { localStorage.setItem(tokenKey, t.trim()); location.reload(); } };
+  modal.querySelector("#lo").onclick = () => { if (confirm("로그아웃?")) { localStorage.removeItem(tokenKey); location.reload(); } };
+  modal.querySelector("#cl").onclick = () => modal.remove();
+});
 
 loadUsers();
 </script>
