@@ -14,7 +14,7 @@
  *   - Cron: retention purge + audit rollup
  */
 import { Hono } from "hono";
-import { getActor, isAdmin, generateToken, hashToken, type Actor } from "./auth";
+import { getActor, isAdmin, isManagerOrAbove, canSeeUser, canIssueRole, scopeFor, generateToken, hashToken, type Actor } from "./auth";
 import { maskString, maskJsonValue } from "./masking";
 import { costUsd } from "./pricing";
 import { maybeOffload, loadIfOffloaded } from "./r2helpers";
@@ -73,10 +73,9 @@ function sinceParam(c: any) {
   return { days, since: new Date(Date.now() - days * 86400_000).toISOString() };
 }
 
-function teamScope(actor: Actor, env: Env): { sql: string; param?: string } {
-  // Admins see everything. Others see their own team only.
-  if (isAdmin(actor, env)) return { sql: "" };
-  return { sql: " AND (user_email = ? OR team IN (SELECT team FROM events WHERE user_email = ? LIMIT 1))", param: actor.email };
+// Legacy helper retained for callers that still use teamScope (replaced incrementally).
+function teamScope(actor: Actor, _env: Env): { sql: string; params: any[] } {
+  return scopeFor(actor);
 }
 
 // ── Ingestion ──────────────────────────────────────────────────────────────
@@ -168,16 +167,13 @@ app.post("/messages/bulk", async (c) => {
 // ── Read APIs (audited) ────────────────────────────────────────────────────
 app.get("/api/users", async (c) => {
   const actor = c.get("actor");
-  const scope = teamScope(actor, c.env);
+  const scope = scopeFor(actor);
   const sql = `
     SELECT user_email, MAX(user_name) user_name, MAX(team) team,
            COUNT(DISTINCT session_id) sessions, MAX(ts) last_seen
     FROM events WHERE user_email IS NOT NULL ${scope.sql}
     GROUP BY user_email ORDER BY last_seen DESC LIMIT 500`;
-  const stmt = scope.param
-    ? c.env.DB.prepare(sql).bind(actor.email, actor.email)
-    : c.env.DB.prepare(sql);
-  const r = await stmt.all();
+  const r = await c.env.DB.prepare(sql).bind(...scope.params).all();
   await audit(c.env, actor, "list_users", null, null, c.req.header("cf-connecting-ip") || null);
   return c.json(r.results);
 });
@@ -185,12 +181,13 @@ app.get("/api/users", async (c) => {
 app.get("/api/sessions", async (c) => {
   const actor = c.get("actor");
   const targetUser = c.req.query("user");
-  if (!isAdmin(actor, c.env) && targetUser && targetUser !== actor.email) {
-    // Allow team-mates only
-    const sameTeam = await c.env.DB.prepare(
-      "SELECT 1 FROM events WHERE user_email = ? AND team IN (SELECT team FROM events WHERE user_email = ? LIMIT 1) LIMIT 1"
-    ).bind(targetUser, actor.email).first();
-    if (!sameTeam) return c.json({ error: "forbidden" }, 403);
+  if (targetUser && targetUser !== actor.email && !isAdmin(actor)) {
+    // For manager/general, must be in same team as target
+    if (actor.role === "general") return c.json({ error: "forbidden" }, 403);
+    const targetTeam: any = await c.env.DB.prepare(
+      "SELECT team FROM events WHERE user_email = ? AND team IS NOT NULL LIMIT 1"
+    ).bind(targetUser).first();
+    if (!targetTeam || targetTeam.team !== actor.team) return c.json({ error: "forbidden" }, 403);
   }
   const limit = Math.min(1000, parseInt(c.req.query("limit") || "200", 10));
   const filters = ["session_id IS NOT NULL"]; const params: any[] = [];
@@ -228,11 +225,8 @@ app.get("/api/sessions/:id/messages", async (c) => {
     FROM events WHERE session_id = ?
   `).bind(sid).first<any>();
 
-  if (head && !isAdmin(actor, c.env) && head.user_email !== actor.email) {
-    const sameTeam = head.team && (await c.env.DB.prepare(
-      "SELECT 1 FROM events WHERE user_email = ? AND team = ? LIMIT 1"
-    ).bind(actor.email, head.team).first());
-    if (!sameTeam) return c.json({ error: "forbidden" }, 403);
+  if (head && !canSeeUser(actor, head.user_email, head.team)) {
+    return c.json({ error: "forbidden" }, 403);
   }
   if (head) head.cost_usd = costUsd(head);
 
@@ -262,7 +256,11 @@ app.get("/api/sessions/:id/messages", async (c) => {
 app.get("/api/users/:email/plan", async (c) => {
   const actor = c.get("actor");
   const email = c.req.param("email");
-  if (!isAdmin(actor, c.env) && email !== actor.email) return c.json({ error: "forbidden" }, 403);
+  // Find target user's team to check manager scope
+  const target: any = email === actor.email ? { team: actor.team } : await c.env.DB.prepare(
+    "SELECT team FROM events WHERE user_email = ? AND team IS NOT NULL LIMIT 1"
+  ).bind(email).first();
+  if (!canSeeUser(actor, email, target?.team)) return c.json({ error: "forbidden" }, 403);
   const { days, since } = sinceParam(c);
   const byModel = await c.env.DB.prepare(`
     SELECT model, SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens,
@@ -332,6 +330,16 @@ function whereTeamUserModel(c: any): { where: string; bind: any[]; days: number;
   if (c.req.query("team"))  { filters.push("team = ?");       bind.push(c.req.query("team")); }
   if (c.req.query("user"))  { filters.push("user_email = ?"); bind.push(c.req.query("user")); }
   if (c.req.query("model")) { filters.push("model = ?");      bind.push(c.req.query("model")); }
+  // Apply actor's role-based scope (admin no-op, manager team-scoped, general self-only)
+  const actor = c.get("actor");
+  if (actor) {
+    const sc = scopeFor(actor);
+    if (sc.sql) {
+      // sc.sql is " AND <expr> " — strip leading AND for join
+      filters.push(sc.sql.trim().replace(/^AND\s+/, ""));
+      bind.push(...sc.params);
+    }
+  }
   return { where: filters.join(" AND "), bind, days, since };
 }
 
@@ -482,7 +490,7 @@ app.get("/export.csv", async (c) => {
 // Audit log (admin only)
 app.get("/api/audit", async (c) => {
   const actor = c.get("actor");
-  if (!isAdmin(actor, c.env)) return c.json({ error: "forbidden" }, 403);
+  if (!isAdmin(actor)) return c.json({ error: "forbidden" }, 403);
   const limit = Math.min(500, parseInt(c.req.query("limit") || "100", 10));
   const r = await c.env.DB.prepare(
     "SELECT * FROM access_log ORDER BY id DESC LIMIT ?"
@@ -521,34 +529,39 @@ async function runRetention(env: Env): Promise<{ events: number; messages: numbe
 // ── Token management (admin only) ─────────────────────────────────────────
 app.get("/api/admin/tokens", async (c) => {
   const actor = c.get("actor");
-  if (!isAdmin(actor, c.env)) return c.json({ error: "forbidden" }, 403);
+  if (!isManagerOrAbove(actor)) return c.json({ error: "forbidden" }, 403);
+  const filters = ["1=1"]; const params: any[] = [];
+  if (actor.role === "manager") { filters.push("team = ?"); params.push(actor.team || ""); }
   const r = await c.env.DB.prepare(`
     SELECT substr(token_hash,1,8) || '…' AS hash_prefix,
-           user_email, user_name, team, is_admin,
+           user_email, user_name, team, role, is_admin,
            created_at, last_used_at, revoked_at, notes
-    FROM tokens ORDER BY created_at DESC LIMIT 200
-  `).all();
+    FROM tokens WHERE ${filters.join(" AND ")} ORDER BY created_at DESC LIMIT 200
+  `).bind(...params).all();
   return c.json(r.results || []);
 });
 
 app.post("/api/admin/tokens", async (c) => {
   const actor = c.get("actor");
-  if (!isAdmin(actor, c.env)) return c.json({ error: "forbidden" }, 403);
+  if (!isManagerOrAbove(actor)) return c.json({ error: "forbidden" }, 403);
   const body = await c.req.json<any>();
   if (!body.email) return c.json({ error: "email required" }, 400);
+  const role = (body.role || (body.admin ? "admin" : "general")) as "admin" | "manager" | "general";
+  if (!["admin", "manager", "general"].includes(role)) return c.json({ error: "invalid role" }, 400);
+  if (!canIssueRole(actor, role)) return c.json({ error: `cannot issue role=${role}` }, 403);
+  if (actor.role === "manager" && body.team && body.team !== actor.team) {
+    return c.json({ error: "manager can only invite into own team" }, 403);
+  }
+  const team = actor.role === "manager" ? actor.team : (body.team || null);
   const raw = generateToken();
   const hash = await hashToken(raw);
   await c.env.DB.prepare(`
-    INSERT INTO tokens (token_hash, user_email, user_name, team, is_admin, created_at, notes)
-    VALUES (?,?,?,?,?,?,?)
+    INSERT INTO tokens (token_hash, user_email, user_name, team, is_admin, role, created_at, notes)
+    VALUES (?,?,?,?,?,?,?,?)
   `).bind(
-    hash,
-    body.email,
-    body.name || null,
-    body.team || null,
-    body.admin ? 1 : 0,
-    new Date().toISOString(),
-    body.notes || null
+    hash, body.email, body.name || null, team,
+    role === "admin" ? 1 : 0, role,
+    new Date().toISOString(), body.notes || null
   ).run();
   await audit(c.env, actor, "token_create", body.email, null, c.req.header("cf-connecting-ip") || null);
   return c.json({
@@ -562,7 +575,7 @@ app.post("/api/admin/tokens", async (c) => {
 
 app.delete("/api/admin/tokens/:hashPrefix", async (c) => {
   const actor = c.get("actor");
-  if (!isAdmin(actor, c.env)) return c.json({ error: "forbidden" }, 403);
+  if (!isManagerOrAbove(actor)) return c.json({ error: "forbidden" }, 403);
   const prefix = c.req.param("hashPrefix").replace(/…$/, "");
   const r = await c.env.DB.prepare(
     "UPDATE tokens SET revoked_at = ? WHERE token_hash LIKE ? AND revoked_at IS NULL"
@@ -574,7 +587,7 @@ app.delete("/api/admin/tokens/:hashPrefix", async (c) => {
 // "Whoami" — useful debugging for client setup
 app.get("/api/me", async (c) => {
   const a = c.get("actor");
-  return c.json({ email: a.email, name: a.name, team: a.team, via: a.via, is_admin: a.is_admin });
+  return c.json({ email: a.email, name: a.name, team: a.team, role: a.role, via: a.via, is_admin: a.role === "admin" });
 });
 
 // ── Self-signup (no admin needed) ─────────────────────────────────────────
@@ -729,7 +742,7 @@ echo "본인 대시보드: \$BASE/?token=\$TOKEN"
 // Admin endpoint (admin OR shared bearer)
 app.post("/api/admin/retention", async (c) => {
   const actor = c.get("actor");
-  if (!isAdmin(actor, c.env)) return c.json({ error: "forbidden" }, 403);
+  if (!isAdmin(actor)) return c.json({ error: "forbidden" }, 403);
   const result = await runRetention(c.env);
   return c.json({ ok: true, ...result });
 });
