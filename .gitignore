@@ -11,3 +11,4 @@ public/dashboard.html
 public/sessions.html
 package-lock.json
 .DS_Store
+.gstack/

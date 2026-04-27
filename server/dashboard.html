@@ -3,235 +3,508 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Claude Tracker — 전사 대시보드</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<title>Claude Tracker · Insights</title>
 <style>
-  :root { color-scheme: dark; --bg:#0b0d10; --panel:#14181d; --line:#222932; --fg:#e6edf3; --mute:#8b949e; --accent:#ff8c42; --good:#3fb950; --warn:#d29922; }
+  :root {
+    color-scheme: dark;
+    --bg:#0a0d12;
+    --panel:#11151b;
+    --panel-2:#161b22;
+    --line:#1c222b;
+    --line-2:#262d38;
+    --fg:#e6edf3;
+    --mute:#7d8590;
+    --dim:#5e6673;
+    --accent:#3b82f6;
+    --accent-soft:#1e3a8a44;
+    --good:#22c55e;
+    --warn:#f59e0b;
+    --bad:#ef4444;
+    /* Heatmap palette (5 levels, GitHub-style green) */
+    --hm-0:#161b22;
+    --hm-1:#0e4429;
+    --hm-2:#006d32;
+    --hm-3:#26a641;
+    --hm-4:#39d353;
+  }
   * { box-sizing: border-box }
-  body { margin:0; font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro",Inter,system-ui,sans-serif; background:var(--bg); color:var(--fg); }
-  header { display:flex; align-items:center; gap:14px; padding:14px 24px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
-  header h1 { margin:0; font-size:16px; font-weight:600; }
+  html, body { margin:0; padding:0; }
+  body { font: 13.5px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro","Pretendard",Inter,system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb { background:#262d38; border-radius:5px; border:2px solid var(--bg); }
+
+  /* Header */
+  header { display:flex; align-items:center; gap:14px; padding:16px 28px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { margin:0; font-size:14px; font-weight:600; display:flex; align-items:center; gap:10px; }
+  header .pill { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:14px; background:var(--panel-2); color:var(--mute); font-size:11px; }
+  header .pill.live { color:var(--good); }
+  header .pill.live::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--good); animation:pulse 2s infinite; }
+  @keyframes pulse { 0%, 100% { opacity:1 } 50% { opacity:.4 } }
   header .grow { flex:1 }
-  header input, header select { background:var(--panel); color:var(--fg); border:1px solid var(--line); padding:6px 10px; border-radius:6px; font-size:13px; }
-  header button { background:var(--accent); color:#000; border:0; padding:6px 14px; border-radius:6px; font-weight:600; cursor:pointer; }
-  header a.btn { background:#1f2630; color:var(--fg); padding:6px 12px; border-radius:6px; font-size:13px; text-decoration:none; border:1px solid var(--line); }
-  main { padding:20px 24px; display:grid; gap:16px; grid-template-columns: repeat(4, 1fr); }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
-  .card h3 { margin:0 0 6px; font-size:12px; color:var(--mute); text-transform:uppercase; letter-spacing:.05em; font-weight:500; }
-  .card .num { font-size:26px; font-weight:700; font-variant-numeric: tabular-nums; }
-  .card .num.cost { color:var(--accent); }
-  .card .sub { color:var(--mute); font-size:12px; margin-top:4px; }
-  .wide { grid-column: span 4; }
-  .half { grid-column: span 2; }
-  table { width:100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); font-size:13px; }
-  th { color:var(--mute); font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
-  tr:hover td { background:#1a2029 }
-  td.num, th.num { text-align:right; font-variant-numeric: tabular-nums; }
-  .pill { display:inline-block; padding:2px 8px; background:#1f2630; border-radius:999px; font-size:11px; color:var(--mute); cursor:pointer; }
-  .pill.active { background:var(--accent); color:#000; }
-  .err { color:#ff6b6b; padding:16px; }
-  canvas { max-height: 280px; }
-  code { background:#1f2630; padding:1px 6px; border-radius:4px; font-size:12px; }
+  header select, header input { background:var(--panel-2); color:var(--fg); border:1px solid var(--line); padding:6px 12px; border-radius:8px; font-size:12.5px; }
+  header a.btn, header button.btn { background:var(--panel-2); border:1px solid var(--line); color:var(--fg); padding:6px 12px; border-radius:8px; font-size:12.5px; cursor:pointer; text-decoration:none; }
+  header a.btn:hover { background:#1c232f; }
+
+  main { padding:28px; max-width:1400px; margin:0 auto; }
+
+  /* Section */
+  .section { margin-bottom:32px; }
+  .section h2 { font-size:14px; font-weight:600; color:var(--fg); margin:0 0 14px; display:flex; align-items:center; gap:10px; }
+  .section h2 .sub { font-weight:400; color:var(--mute); font-size:12px; }
+
+  /* KPI grid */
+  .kpis { display:grid; grid-template-columns:repeat(4, 1fr); gap:16px; }
+  .kpi { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; }
+  .kpi .label { font-size:11px; color:var(--mute); text-transform:uppercase; letter-spacing:.06em; font-weight:500; }
+  .kpi .num { font-size:28px; font-weight:700; margin-top:6px; font-variant-numeric:tabular-nums; }
+  .kpi .sub { font-size:12px; color:var(--mute); margin-top:6px; }
+  .kpi .delta { display:inline-block; padding:2px 8px; border-radius:8px; font-size:11px; margin-left:6px; }
+  .kpi .delta.up { background:#22c55e22; color:var(--good); }
+  .kpi .delta.down { background:#ef444422; color:var(--bad); }
+
+  /* Heatmap */
+  .heatmap-card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; }
+  .heatmap-card .head { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; }
+  .heatmap-card .head .title { font-size:13px; font-weight:500; }
+  .heatmap-card .head .legend { display:flex; align-items:center; gap:6px; color:var(--mute); font-size:11px; }
+  .heatmap-card .head .legend .cells { display:flex; gap:3px; margin:0 6px; }
+  .heatmap-card .head .legend .cell { width:11px; height:11px; border-radius:2px; }
+  .heatmap-grid { display:grid; grid-auto-flow:column; grid-template-rows:repeat(7, 11px); gap:3px; overflow-x:auto; padding-bottom:8px; }
+  .heatmap-grid .cell { width:11px; height:11px; border-radius:2px; background:var(--hm-0); }
+  .heatmap-grid .cell:hover { outline:1px solid var(--accent); outline-offset:1px; }
+  .heatmap-grid .month-label { grid-row:1; font-size:10px; color:var(--mute); white-space:nowrap; }
+  .heatmap-summary { display:flex; gap:24px; margin-top:14px; color:var(--mute); font-size:12px; }
+  .heatmap-summary b { color:var(--fg); font-weight:600; }
+
+  /* Two-column */
+  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; }
+  .card .title { font-size:13px; font-weight:500; margin-bottom:14px; display:flex; justify-content:space-between; align-items:center; }
+  .card .title .badge { background:var(--panel-2); color:var(--mute); padding:2px 9px; border-radius:10px; font-size:10.5px; font-weight:500; }
+
+  /* Tables */
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  thead th { text-align:left; color:var(--mute); font-weight:500; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; padding:8px 10px; border-bottom:1px solid var(--line); }
+  thead th.num { text-align:right; }
+  tbody td { padding:10px; border-bottom:1px solid var(--line); font-size:12.5px; }
+  tbody td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  tbody tr:hover td { background:#161b22; }
+  tbody tr:last-child td { border-bottom:none; }
+  .pill-tag { display:inline-block; padding:1px 7px; border-radius:8px; background:var(--accent-soft); color:#93c5fd; font-size:10.5px; }
+  .name { font-weight:500; }
   a.link { color:var(--accent); text-decoration:none; }
   a.link:hover { text-decoration:underline; }
+
+  /* Tool usage horizontal bars */
+  .tools-list { display:flex; flex-direction:column; gap:8px; }
+  .tool-row { display:grid; grid-template-columns:90px 1fr 60px; align-items:center; gap:12px; font-size:12.5px; }
+  .tool-row .name { font-family: ui-monospace, "SF Mono", monospace; color:var(--fg); }
+  .tool-row .bar { height:8px; background:var(--panel-2); border-radius:4px; overflow:hidden; }
+  .tool-row .bar > div { height:100%; background:linear-gradient(90deg, var(--accent), #818cf8); border-radius:4px; }
+  .tool-row .count { text-align:right; color:var(--mute); }
+
+  /* Hourly distribution */
+  .hours { display:grid; grid-template-columns:repeat(24, 1fr); gap:3px; height:60px; align-items:end; margin-top:10px; }
+  .hour-bar { background:var(--accent); border-radius:2px 2px 0 0; min-height:2px; }
+  .hour-axis { display:grid; grid-template-columns:repeat(24, 1fr); gap:3px; font-size:9px; color:var(--mute); margin-top:4px; }
+  .hour-axis div { text-align:center; }
+
+  /* Empty / loading */
+  .empty { color:var(--mute); padding:40px; text-align:center; font-size:13px; }
+  .err { color:var(--bad); padding:14px; border:1px solid #ef444444; background:#ef444411; border-radius:10px; }
+
+  @media (max-width: 900px) {
+    .kpis { grid-template-columns:repeat(2, 1fr); }
+    .grid-2 { grid-template-columns:1fr; }
+    main { padding:18px; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>🟧 Claude Tracker · 전사</h1>
-  <span class="pill" id="healthPill">연결 중…</span>
-  <span class="pill" id="filtersPill" style="display:none"></span>
+  <h1>🟧 Claude Tracker <span class="pill" id="liveDot">서버 확인중</span></h1>
   <div class="grow"></div>
-  <label>기간 <select id="days"><option>1</option><option>7</option><option selected>14</option><option>30</option><option>90</option></select> 일</label>
+  <select id="days">
+    <option value="7">최근 7일</option>
+    <option value="14">최근 14일</option>
+    <option value="30" selected>최근 30일</option>
+    <option value="90">최근 90일</option>
+    <option value="365">최근 365일</option>
+  </select>
   <select id="teamFilter"><option value="">전체 팀</option></select>
-  <input id="token" placeholder="Bearer 토큰 (필요 시)" size="22" />
-  <button id="refresh">새로고침</button>
+  <input id="token" placeholder="토큰" size="14" />
   <a class="btn" href="/browse">세션 뷰어 →</a>
-  <a id="csvLink" class="btn" href="#">CSV ↓</a>
+  <a class="btn" id="csvLink" href="#">CSV ↓</a>
 </header>
-<main id="app">
-  <div class="card"><h3>총 비용</h3><div class="num cost" id="kCost">—</div><div class="sub" id="kCostSub">USD</div></div>
-  <div class="card"><h3>총 토큰 (입+출)</h3><div class="num" id="kTokens">—</div><div class="sub" id="kTokensSub"></div></div>
-  <div class="card"><h3>활성 사용자 / 팀</h3><div class="num" id="kUsers">—</div><div class="sub">팀 <span id="kTeams">—</span> · 세션 <span id="kSessions">—</span></div></div>
-  <div class="card"><h3>캐시 히트율</h3><div class="num" id="kCache">—</div><div class="sub">cache_read / (input + cache_read)</div></div>
 
-  <div class="card wide"><h3>일별 비용 & 토큰</h3><canvas id="chartDaily"></canvas></div>
-
-  <div class="card half"><h3>팀별 사용량</h3>
-    <table id="tTeams"><thead><tr><th>팀</th><th class="num">사용자</th><th class="num">세션</th><th class="num">토큰</th><th class="num">비용 ($)</th></tr></thead><tbody></tbody></table>
-  </div>
-  <div class="card half"><h3>모델별 사용량</h3>
-    <table id="tModels"><thead><tr><th>모델</th><th class="num">이벤트</th><th class="num">입력</th><th class="num">출력</th><th class="num">비용 ($)</th></tr></thead><tbody></tbody></table>
+<main>
+  <!-- KPIs -->
+  <div class="section">
+    <div class="kpis" id="kpis"></div>
   </div>
 
-  <div class="card half"><h3>도구 사용 TOP</h3>
-    <table id="tTools"><thead><tr><th>도구</th><th class="num">호출</th></tr></thead><tbody></tbody></table>
-  </div>
-  <div class="card half"><h3>사용자 랭킹 (TOP 토큰)</h3>
-    <table id="tUsers"><thead><tr><th>사용자</th><th>팀</th><th class="num">세션</th><th class="num">토큰</th><th class="num">비용 ($)</th></tr></thead><tbody></tbody></table>
+  <!-- Activity heatmap (always 365d for context) -->
+  <div class="section">
+    <h2>활동 히트맵 <span class="sub" id="heatmapTotalDays"></span></h2>
+    <div class="heatmap-card">
+      <div class="head">
+        <div class="title">매일 어떤 강도로 사용했는지 한눈에</div>
+        <div class="legend">
+          적음
+          <div class="cells">
+            <div class="cell" style="background:var(--hm-0)"></div>
+            <div class="cell" style="background:var(--hm-1)"></div>
+            <div class="cell" style="background:var(--hm-2)"></div>
+            <div class="cell" style="background:var(--hm-3)"></div>
+            <div class="cell" style="background:var(--hm-4)"></div>
+          </div>
+          많음
+        </div>
+      </div>
+      <div class="heatmap-grid" id="heatmapGrid"></div>
+      <div class="heatmap-summary" id="heatmapSummary"></div>
+    </div>
   </div>
 
-  <div class="card wide"><h3>최근 세션 <span id="userPill" class="pill" style="display:none"></span></h3>
-    <table id="tSessions"><thead><tr><th>Session</th><th>사용자</th><th>팀</th><th>모델</th><th class="num">이벤트</th><th class="num">토큰</th><th class="num">비용 ($)</th><th>마지막</th></tr></thead><tbody></tbody></table>
+  <!-- Team / Users -->
+  <div class="section grid-2">
+    <div class="card">
+      <div class="title">팀별 사용량 <span class="badge" id="teamCount">0</span></div>
+      <table id="teamTable">
+        <thead><tr><th>팀</th><th class="num">사용자</th><th class="num">세션</th><th class="num">토큰</th><th class="num">비용</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="title">상위 사용자 <span class="badge" id="userCount">0</span></div>
+      <table id="userTable">
+        <thead><tr><th>사용자</th><th>팀</th><th class="num">세션</th><th class="num">토큰</th><th class="num">비용</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Tools / Session metrics -->
+  <div class="section grid-2">
+    <div class="card">
+      <div class="title">사용한 도구 TOP <span class="badge" id="toolTotal">0</span></div>
+      <div class="tools-list" id="toolsList"></div>
+    </div>
+    <div class="card">
+      <div class="title">세션 메트릭</div>
+      <div id="sessionMetrics"></div>
+    </div>
+  </div>
+
+  <!-- Hourly activity (시간대) -->
+  <div class="section">
+    <div class="card">
+      <div class="title">시간대별 활동 <span class="badge">KST</span></div>
+      <div class="hours" id="hoursBars"></div>
+      <div class="hour-axis" id="hoursAxis"></div>
+    </div>
+  </div>
+
+  <!-- Recent sessions -->
+  <div class="section">
+    <div class="card">
+      <div class="title">최근 세션 <span class="badge" id="sessionTableCount">0</span></div>
+      <table id="sessionTable">
+        <thead><tr><th>시작 (KST)</th><th>사용자</th><th>팀</th><th>모델</th><th class="num">메시지</th><th class="num">시간</th><th class="num">토큰</th><th class="num">비용</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </div>
 </main>
 
 <script>
 const qs = (s) => document.querySelector(s);
-const fmt = (n) => (n==null? "—" : Number(n).toLocaleString());
-const fmtUSD = (n) => "$" + (Number(n||0)).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 });
-const fmtUSDsmall = (n) => "$" + (Number(n||0)).toLocaleString(undefined, { maximumFractionDigits: 4 });
-const fmtTime = (s) => {
-  if (!s) return "";
-  const d = new Date(s); if (isNaN(d)) return s;
-  const f = new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul",
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", hour12: false });
-  const p = Object.fromEntries(f.formatToParts(d).map(x => [x.type, x.value]));
-  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+const fmt = (n) => Number(n||0).toLocaleString();
+const fmtUSD = (n) => "$" + Number(n||0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtUSDsmall = (n) => "$" + Number(n||0).toLocaleString(undefined, { maximumFractionDigits: 4 });
+
+const fmtKST = (s) => {
+  if (!s) return "—";
+  const d = new Date(s); if (isNaN(d)) return "—";
+  return new Intl.DateTimeFormat("ko-KR", { timeZone:"Asia/Seoul", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", hour12:false }).format(d);
 };
-let chart, filterUser = null;
+const fmtDur = (s) => {
+  if (!s || s < 0) return "—";
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s/60) + "m " + (s%60) + "s";
+  return Math.floor(s/3600) + "h " + Math.floor((s%3600)/60) + "m";
+};
 
 const tokenKey = "claude-tracker-token";
-// Allow ?token=… in URL to seed localStorage on first visit
 const _urlTok = new URLSearchParams(location.search).get("token");
 if (_urlTok) { localStorage.setItem(tokenKey, _urlTok); history.replaceState(null, "", location.pathname); }
 qs("#token").value = localStorage.getItem(tokenKey) || "";
 qs("#token").addEventListener("change", e => localStorage.setItem(tokenKey, e.target.value));
-qs("#refresh").addEventListener("click", load);
 qs("#days").addEventListener("change", load);
 qs("#teamFilter").addEventListener("change", load);
 
 function buildQuery(extra = {}) {
   const params = new URLSearchParams();
   params.set("days", qs("#days").value);
-  const team = qs("#teamFilter").value;
-  if (team) params.set("team", team);
-  if (filterUser) params.set("user", filterUser);
-  const t = qs("#token").value.trim();
-  if (t) params.set("token", t);
+  const team = qs("#teamFilter").value; if (team) params.set("team", team);
+  const t = qs("#token").value.trim(); if (t) params.set("token", t);
   for (const [k,v] of Object.entries(extra)) if (v) params.set(k, v);
   return params.toString();
 }
-
 async function api(path) {
   const url = `${path}${path.includes("?") ? "&" : "?"}${buildQuery()}`;
   const r = await fetch(url);
-  if (r.status === 401) throw new Error("unauthorized — 토큰 확인");
   if (!r.ok) throw new Error(`HTTP ${r.status} on ${path}`);
+  return r.json();
+}
+async function apiYear(path) {
+  // For heatmap — always 365 days regardless of UI period
+  const params = new URLSearchParams(); params.set("days", "365");
+  const t = qs("#token").value.trim(); if (t) params.set("token", t);
+  const team = qs("#teamFilter").value; if (team) params.set("team", team);
+  const r = await fetch(`${path}?${params.toString()}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
 
 async function load() {
   qs("#csvLink").href = `/export.csv?${buildQuery()}`;
-  const filters = [];
-  if (qs("#teamFilter").value) filters.push(`team=${qs("#teamFilter").value}`);
-  if (filterUser) filters.push(`user=${filterUser}`);
-  const fp = qs("#filtersPill");
-  if (filters.length) { fp.style.display = "inline-block"; fp.classList.add("active"); fp.textContent = "필터: " + filters.join(" · ") + " ✕"; fp.onclick = () => { filterUser = null; qs("#teamFilter").value = ""; load(); }; }
-  else fp.style.display = "none";
-
   try {
     const h = await fetch("/health").then(r => r.json()).catch(() => null);
-    qs("#healthPill").textContent = h?.ok ? "서버 OK" : "서버 오프라인";
+    qs("#liveDot").className = "pill " + (h?.ok ? "live" : "");
+    qs("#liveDot").textContent = h?.ok ? "Live" : "Server offline";
 
-    const [stats, ts, users, teams, sessions] = await Promise.all([
-      api("/stats"), api("/timeseries"), api("/users"), api("/teams"), api(`/sessions?limit=200`),
+    const [stats, ts365, users, teams, sessions] = await Promise.all([
+      api("/stats"),
+      apiYear("/timeseries"),
+      api("/users"),
+      api("/teams"),
+      api("/sessions?limit=300"),
     ]);
 
-    // Populate team filter once
-    const sel = qs("#teamFilter");
-    if (sel.options.length <= 1) {
-      const cur = sel.value;
-      sel.innerHTML = '<option value="">전체 팀</option>' + teams.map(t => `<option value="${t.team}">${t.team}</option>`).join("");
-      sel.value = cur;
-    }
-
-    const t = stats.totals;
-    qs("#kCost").textContent = fmtUSD(t.cost_usd);
-    qs("#kCostSub").textContent = `${stats.byModel.length} 모델 사용`;
-    const totTok = (t.input_tokens||0) + (t.output_tokens||0);
-    qs("#kTokens").textContent = fmt(totTok);
-    qs("#kTokensSub").textContent = `입력 ${fmt(t.input_tokens)} · 출력 ${fmt(t.output_tokens)}`;
-    qs("#kUsers").textContent = fmt(t.users);
-    qs("#kTeams").textContent = fmt(t.teams);
-    qs("#kSessions").textContent = fmt(t.sessions);
-    const hit = (t.cache_read_tokens || 0) / Math.max(1, (t.input_tokens || 0) + (t.cache_read_tokens || 0));
-    qs("#kCache").textContent = (hit * 100).toFixed(1) + "%";
-
-    renderChart(ts.rows);
-
-    fillTable("#tTeams tbody", teams, x => [
-      `<a href="#" class="link" data-team="${x.team}">${x.team}</a>`,
-      x.users, x.sessions, fmt((x.input_tokens||0)+(x.output_tokens||0)), fmtUSD(x.cost_usd)
-    ]);
-    document.querySelectorAll("#tTeams a[data-team]").forEach(a =>
-      a.addEventListener("click", e => { e.preventDefault(); qs("#teamFilter").value = a.dataset.team; load(); })
-    );
-
-    fillTable("#tModels tbody", stats.byModel, m => [
-      m.model, m.n, fmt(m.input_tokens), fmt(m.output_tokens), fmtUSD(m.cost_usd)
-    ]);
-    fillTable("#tTools tbody", stats.byTool, x => [x.tool_name, x.n]);
-    fillTable("#tUsers tbody", users, u => [
-      `<a href="#" class="link" data-user="${u.user_email}">${u.user_name || u.user_email}</a>`,
-      u.team || "—", u.sessions, fmt((u.input_tokens||0)+(u.output_tokens||0)), fmtUSD(u.cost_usd)
-    ]);
-    document.querySelectorAll("#tUsers a[data-user]").forEach(a =>
-      a.addEventListener("click", e => { e.preventDefault(); filterUser = a.dataset.user; load(); })
-    );
-
-    fillTable("#tSessions tbody", sessions.slice(0, 100), s => [
-      `<code>${(s.session_id||"").slice(0,12)}</code>`,
-      s.user_email || "—", s.team || "—", s.model || "—", s.events,
-      fmt((s.input_tokens||0)+(s.output_tokens||0)),
-      fmtUSDsmall(s.cost_usd),
-      fmtTime(s.last_event)
-    ]);
-
-    const up = qs("#userPill");
-    if (filterUser) { up.style.display = "inline-block"; up.classList.add("active"); up.textContent = `${filterUser} ✕`; up.onclick = () => { filterUser = null; load(); }; }
-    else up.style.display = "none";
+    populateTeamFilter(teams);
+    renderKPIs(stats, sessions);
+    renderHeatmap(ts365.rows || []);
+    renderTeams(teams);
+    renderUsers(users);
+    renderTools(stats.byTool || []);
+    renderSessionMetrics(sessions, stats);
+    renderHourly(sessions);
+    renderSessionsTable(sessions);
   } catch (e) {
-    qs("#app").insertAdjacentHTML("afterbegin", `<div class="card wide err">⚠ ${e.message}</div>`);
+    qs("#kpis").innerHTML = `<div class="err">⚠ ${e.message}</div>`;
   }
 }
 
-function fillTable(sel, rows, map) {
-  const tb = qs(sel);
-  const headerCells = tb.closest("table").querySelectorAll("thead th");
-  tb.innerHTML = rows.length ? rows.map(r => {
-    const cells = map(r);
-    return "<tr>" + cells.map((c,i) =>
-      `<td${headerCells[i]?.classList.contains("num")?' class="num"':""}>${c ?? ""}</td>`
-    ).join("") + "</tr>";
-  }).join("") : `<tr><td colspan="9" style="color:var(--mute);text-align:center;padding:20px">데이터 없음</td></tr>`;
+function populateTeamFilter(teams) {
+  const sel = qs("#teamFilter");
+  if (sel.options.length > 1) return;
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">전체 팀</option>' + teams.map(t => `<option value="${t.team}">${t.team}</option>`).join("");
+  sel.value = cur;
 }
 
-function renderChart(rows) {
-  const labels = rows.map(r => r.day);
-  const data = {
-    labels,
-    datasets: [
-      { type:"bar", label: "Input",      data: rows.map(r => r.input_tokens || 0),       backgroundColor: "#ff8c42", yAxisID:"y" },
-      { type:"bar", label: "Output",     data: rows.map(r => r.output_tokens || 0),      backgroundColor: "#4da3ff", yAxisID:"y" },
-      { type:"bar", label: "Cache Read", data: rows.map(r => r.cache_read_tokens || 0),  backgroundColor: "#3a3f47", yAxisID:"y" },
-      { type:"line", label: "비용 ($)",  data: rows.map(r => +(r.cost_usd || 0).toFixed(2)), borderColor: "#3fb950", backgroundColor:"#3fb95033", yAxisID:"y1", tension:0.25, pointRadius:3 },
-    ],
-  };
-  const opts = {
-    responsive: true, maintainAspectRatio: false,
-    scales: {
-      x:  { stacked:true, grid:{color:"#1f2630"}, ticks:{color:"#8b949e"} },
-      y:  { stacked:true, position:"left",  grid:{color:"#1f2630"}, ticks:{color:"#8b949e", callback: v => v >= 1e6 ? (v/1e6).toFixed(1)+"M" : v >= 1e3 ? (v/1e3).toFixed(0)+"k" : v } },
-      y1: { position:"right", grid:{display:false}, ticks:{color:"#3fb950", callback: v => "$"+v} },
-    },
-    plugins: { legend: { labels: { color: "#e6edf3" } } },
-  };
-  if (chart) { chart.data = data; chart.options = opts; chart.update(); }
-  else chart = new Chart(qs("#chartDaily"), { data, options: opts });
+function renderKPIs(stats, sessions) {
+  const t = stats.totals;
+  const totalTok = (t.input_tokens||0) + (t.output_tokens||0);
+  // avg session duration
+  let totalDur = 0, msgCount = 0;
+  for (const s of sessions) {
+    const d = (new Date(s.last_event) - new Date(s.started)) / 1000;
+    if (d > 0 && d < 86400) totalDur += d;
+    msgCount += s.events || 0;
+  }
+  const avgDur = sessions.length ? Math.round(totalDur / sessions.length) : 0;
+
+  qs("#kpis").innerHTML = `
+    <div class="kpi">
+      <div class="label">총 비용</div>
+      <div class="num" style="color:#fb923c">${fmtUSD(t.cost_usd)}</div>
+      <div class="sub">${stats.byModel.length}개 모델 · 입출력 ${fmt(totalTok)} 토큰</div>
+    </div>
+    <div class="kpi">
+      <div class="label">활성 사용자</div>
+      <div class="num">${fmt(t.users)} <span style="font-size:14px;color:var(--mute)">/ ${fmt(t.teams)}팀</span></div>
+      <div class="sub">기간 내 1회 이상 활동</div>
+    </div>
+    <div class="kpi">
+      <div class="label">세션 수</div>
+      <div class="num">${fmt(t.sessions)}</div>
+      <div class="sub">메시지 ${fmt(msgCount)}개</div>
+    </div>
+    <div class="kpi">
+      <div class="label">평균 세션 시간</div>
+      <div class="num">${fmtDur(avgDur)}</div>
+      <div class="sub">${avgDur ? Math.round(msgCount / Math.max(1, sessions.length)) + " 메시지/세션" : "—"}</div>
+    </div>
+  `;
 }
+
+function renderHeatmap(rows) {
+  // Build a date → token map
+  const byDate = {};
+  let max = 0;
+  for (const r of rows) {
+    const v = (r.input_tokens || 0) + (r.output_tokens || 0);
+    byDate[r.day] = v;
+    if (v > max) max = v;
+  }
+  // Generate 53 weeks × 7 days starting from Sunday 364 days ago
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const start = new Date(today); start.setDate(start.getDate() - 364);
+  // align start to previous Sunday
+  start.setDate(start.getDate() - start.getDay());
+
+  const grid = qs("#heatmapGrid");
+  grid.innerHTML = "";
+  let totalTokens = 0, activeDays = 0, currentStreak = 0, bestStreak = 0;
+  let runningStreak = 0;
+  const cur = new Date(start);
+  const cells = [];
+  while (cur <= today) {
+    const iso = cur.toISOString().slice(0, 10);
+    const v = byDate[iso] || 0;
+    const level = v === 0 ? 0 : v < max * 0.05 ? 1 : v < max * 0.2 ? 2 : v < max * 0.5 ? 3 : 4;
+    if (cur > start) {
+      if (v > 0) { activeDays++; totalTokens += v; runningStreak++; bestStreak = Math.max(bestStreak, runningStreak); }
+      else runningStreak = 0;
+    }
+    cells.push({ iso, v, level });
+    cur.setDate(cur.getDate() + 1);
+  }
+  // current streak — from today backwards
+  for (let i = cells.length - 1; i >= 0; i--) {
+    if (cells[i].v > 0) currentStreak++; else break;
+  }
+
+  for (const c of cells) {
+    const el = document.createElement("div");
+    el.className = "cell";
+    el.style.background = `var(--hm-${c.level})`;
+    el.title = `${c.iso} · ${fmt(c.v)} 토큰`;
+    grid.appendChild(el);
+  }
+  qs("#heatmapTotalDays").textContent = `(지난 365일 · 활동일 ${activeDays}일 · 최고 연속 ${bestStreak}일)`;
+  qs("#heatmapSummary").innerHTML = `
+    <span><b>${fmt(activeDays)}</b>일 활동</span>
+    <span><b>${fmt(currentStreak)}</b>일 연속 (현재)</span>
+    <span><b>${fmt(bestStreak)}</b>일 최고 연속</span>
+    <span><b>${fmt(Math.round(totalTokens))}</b> 누적 토큰</span>
+  `;
+}
+
+function renderTeams(teams) {
+  qs("#teamCount").textContent = teams.length;
+  qs("#teamTable tbody").innerHTML = teams.length ? teams.map(t => `
+    <tr>
+      <td><a href="#" class="link" data-team="${t.team}">${t.team}</a></td>
+      <td class="num">${fmt(t.users)}</td>
+      <td class="num">${fmt(t.sessions)}</td>
+      <td class="num">${fmt((t.input_tokens||0)+(t.output_tokens||0))}</td>
+      <td class="num">${fmtUSD(t.cost_usd)}</td>
+    </tr>
+  `).join("") : `<tr><td colspan="5" class="empty">데이터 없음</td></tr>`;
+  document.querySelectorAll('#teamTable a[data-team]').forEach(a => a.addEventListener("click", e => {
+    e.preventDefault(); qs("#teamFilter").value = a.dataset.team; load();
+  }));
+}
+
+function renderUsers(users) {
+  qs("#userCount").textContent = users.length;
+  qs("#userTable tbody").innerHTML = users.length ? users.slice(0, 12).map(u => `
+    <tr>
+      <td class="name">
+        ${escapeHtml(u.user_name || u.user_email)}
+        <div style="color:var(--dim);font-size:10.5px;margin-top:1px">${escapeHtml(u.user_email)}</div>
+      </td>
+      <td>${u.team ? `<span class="pill-tag">${escapeHtml(u.team)}</span>` : "—"}</td>
+      <td class="num">${fmt(u.sessions)}</td>
+      <td class="num">${fmt((u.input_tokens||0)+(u.output_tokens||0))}</td>
+      <td class="num">${fmtUSD(u.cost_usd)}</td>
+    </tr>
+  `).join("") : `<tr><td colspan="5" class="empty">데이터 없음</td></tr>`;
+}
+
+function renderTools(byTool) {
+  qs("#toolTotal").textContent = byTool.reduce((s, x) => s + x.n, 0).toLocaleString();
+  const max = Math.max(...byTool.map(x => x.n), 1);
+  qs("#toolsList").innerHTML = byTool.length ? byTool.slice(0, 12).map(x => `
+    <div class="tool-row">
+      <span class="name">${escapeHtml(x.tool_name)}</span>
+      <div class="bar"><div style="width:${(x.n / max * 100).toFixed(1)}%"></div></div>
+      <span class="count">${fmt(x.n)}</span>
+    </div>
+  `).join("") : '<div class="empty">데이터 없음</div>';
+}
+
+function renderSessionMetrics(sessions, stats) {
+  const totals = stats.totals;
+  let totalDur = 0, totalMsg = 0, longest = 0;
+  for (const s of sessions) {
+    const d = (new Date(s.last_event) - new Date(s.started)) / 1000;
+    if (d > 0 && d < 86400) { totalDur += d; if (d > longest) longest = d; }
+    totalMsg += s.events || 0;
+  }
+  const avgDur = sessions.length ? Math.round(totalDur / sessions.length) : 0;
+  const avgMsg = sessions.length ? Math.round(totalMsg / sessions.length) : 0;
+  const avgTok = sessions.length ? Math.round(((totals.input_tokens||0) + (totals.output_tokens||0)) / sessions.length) : 0;
+
+  qs("#sessionMetrics").innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;font-size:13px">
+      <div>
+        <div style="color:var(--mute);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">평균 시간</div>
+        <div style="font-size:22px;font-weight:700">${fmtDur(avgDur)}</div>
+      </div>
+      <div>
+        <div style="color:var(--mute);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">최장 세션</div>
+        <div style="font-size:22px;font-weight:700">${fmtDur(longest)}</div>
+      </div>
+      <div>
+        <div style="color:var(--mute);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">평균 메시지</div>
+        <div style="font-size:22px;font-weight:700">${fmt(avgMsg)}<span style="font-size:11px;color:var(--mute)"> /세션</span></div>
+      </div>
+      <div>
+        <div style="color:var(--mute);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">평균 토큰</div>
+        <div style="font-size:22px;font-weight:700">${fmt(avgTok)}<span style="font-size:11px;color:var(--mute)"> /세션</span></div>
+      </div>
+    </div>
+  `;
+}
+
+function renderHourly(sessions) {
+  const buckets = Array(24).fill(0);
+  for (const s of sessions) {
+    const d = new Date(s.started);
+    if (isNaN(d)) continue;
+    // KST hour
+    const kstHour = (d.getUTCHours() + 9) % 24;
+    buckets[kstHour]++;
+  }
+  const max = Math.max(...buckets, 1);
+  qs("#hoursBars").innerHTML = buckets.map(v => `<div class="hour-bar" style="height:${(v / max * 100).toFixed(0)}%" title="${v} 세션"></div>`).join("");
+  qs("#hoursAxis").innerHTML = Array.from({length:24}, (_, i) => `<div>${i % 3 === 0 ? i : ""}</div>`).join("");
+}
+
+function renderSessionsTable(sessions) {
+  qs("#sessionTableCount").textContent = sessions.length;
+  qs("#sessionTable tbody").innerHTML = sessions.length ? sessions.slice(0, 30).map(s => {
+    const d = (new Date(s.last_event) - new Date(s.started)) / 1000;
+    return `
+      <tr>
+        <td>${fmtKST(s.started)}</td>
+        <td>${escapeHtml(s.user_email || "—")}</td>
+        <td>${s.team ? `<span class="pill-tag">${escapeHtml(s.team)}</span>` : "—"}</td>
+        <td style="font-family:ui-monospace,monospace;font-size:11px;color:var(--mute)">${escapeHtml((s.model||"—").replace("claude-",""))}</td>
+        <td class="num">${fmt(s.events)}</td>
+        <td class="num">${fmtDur(d)}</td>
+        <td class="num">${fmt((s.input_tokens||0)+(s.output_tokens||0))}</td>
+        <td class="num">${fmtUSDsmall(s.cost_usd)}</td>
+      </tr>`;
+  }).join("") : `<tr><td colspan="8" class="empty">데이터 없음</td></tr>`;
+}
+
+function escapeHtml(s) { return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 
 load();
 </script>

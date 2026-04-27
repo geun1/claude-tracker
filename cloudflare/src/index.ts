@@ -629,21 +629,33 @@ fi
 bold "🟧 claude-tracker 설치"
 echo
 
-# 인터랙티브가 가능한지 확인 (curl | bash 환경에서도 stdin이 tty이면 OK)
-if [ ! -t 0 ]; then
-  if [ -t 1 ] && [ -e /dev/tty ]; then exec </dev/tty; else
-    red "❌ 비대화 환경입니다. 터미널에서 직접 실행해 주세요."; exit 1
-  fi
+# /dev/tty가 사용 가능해야 입력을 받을 수 있음 (curl | bash, ssh -T 등에서 실패할 수 있음)
+if [ ! -e /dev/tty ] || ! exec 3<>/dev/tty 2>/dev/null; then
+  red "❌ 터미널 입력을 받을 수 없습니다. 다음 중 하나로 실행해 주세요:"
+  echo "  bash <(curl -fsSL $BASE/install.sh)"
+  echo "  curl -fsSL $BASE/install.sh -o /tmp/install.sh && bash /tmp/install.sh"
+  exit 1
 fi
 
-# 회사 이메일 자동 추정
-DEFAULT_EMAIL="$(git config --global user.email 2>/dev/null || echo '')"
-DEFAULT_NAME="$(git config --global user.name 2>/dev/null || echo '')"
+ask() {
+  local prompt="\$1" def="\$2" var
+  printf "\\033[1m%s\\033[0m" "\$prompt" >&3
+  # 기본값이 있고 프롬프트 자체에 (Y/n) 같은 표기가 없을 때만 [기본값] 추가
+  if [ -n "\$def" ] && ! echo "\$prompt" | grep -q "[(/]"; then
+    printf " \\033[2m[\$def]\\033[0m" >&3
+  fi
+  printf " " >&3
+  IFS= read -r var <&3 || var=""
+  printf "%s" "\${var:-\$def}"
+}
+
+DEFAULT_EMAIL="\$(git config --global user.email 2>/dev/null || echo '')"
+DEFAULT_NAME="\$(git config --global user.name 2>/dev/null || echo '')"
 DEFAULT_TEAM="\${TEAM:-AX}"
 
-read -r -p "이메일 [\$DEFAULT_EMAIL]: " EMAIL; EMAIL="\${EMAIL:-\$DEFAULT_EMAIL}"
-read -r -p "이름 [\$DEFAULT_NAME]: " NAME; NAME="\${NAME:-\$DEFAULT_NAME}"
-read -r -p "팀 [\$DEFAULT_TEAM]: " TEAM; TEAM="\${TEAM:-\$DEFAULT_TEAM}"
+EMAIL="\$(ask '이메일 (회사)' "\$DEFAULT_EMAIL")"
+NAME="\$(ask '이름' "\$DEFAULT_NAME")"
+TEAM="\$(ask '팀' "\$DEFAULT_TEAM")"
 
 if [ -z "\$EMAIL" ]; then red "❌ 이메일은 필수"; exit 1; fi
 
@@ -690,13 +702,16 @@ fi
 
 # 4) (선택) 백필
 echo
-read -r -p "과거 Claude Code transcript도 지금 백필할까요? (Y/n) " B
-B="\${B:-Y}"
+echo "지난 Claude Code 대화 기록을 지금 가져오면 5~30분 걸릴 수 있습니다."
+echo "(나중에 \`bash \$PLUGIN_DIR/scripts/backfill.js\`로 따로 돌려도 됩니다)"
+B="\$(ask '지금 가져올까요?' 'n')"
 if [ "\$B" = "Y" ] || [ "\$B" = "y" ]; then
   if [ -d "\$HOME/.claude/projects" ] && command -v node >/dev/null; then
-    bold "⏳ 백필 중 (몇 분 걸릴 수 있음)..."
+    bold "⏳ 백필 시작. 진행상황은 아래에 표시됩니다 (Ctrl+C로 중단 가능)..."
     CLAUDE_TRACKER_USER="\$EMAIL" CLAUDE_TRACKER_NAME="\$NAME" CLAUDE_TRACKER_TEAM="\$TEAM" \\
-      node "\$PLUGIN_DIR/scripts/backfill.js" "\$ENDPOINT" "\$TOKEN" 2>&1 | tail -3
+      node "\$PLUGIN_DIR/scripts/backfill.js" "\$ENDPOINT" "\$TOKEN" || red "⚠ 백필 중단됨 (나중에 다시 실행 가능)"
+  else
+    red "⚠ ~/.claude/projects 또는 node가 없어 백필 건너뜀"
   fi
 fi
 
