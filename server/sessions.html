@@ -205,6 +205,17 @@
   .msg.final .bubble { border-left:3px solid var(--asst); padding-left:14px; }
   .msg.final .text { font-size:14.5px; }
 
+  /* Session title bar */
+  .conv-titlebar { display:flex; align-items:center; gap:10px; padding:14px 24px 0; }
+  .conv-titlebar h2 { margin:0; font-size:16px; font-weight:600; color:var(--fg); cursor:pointer; padding:6px 10px; border-radius:6px; transition:background .12s; flex-shrink:1; min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .conv-titlebar h2:hover { background:#1a2229; }
+  .conv-titlebar h2.custom { color:var(--accent); }
+  .conv-titlebar h2.custom::before { content:"📌 "; }
+  .title-edit { background:transparent; border:0; color:var(--mute); cursor:pointer; padding:6px; font-size:13px; opacity:0; transition:opacity .12s; border-radius:6px; }
+  .conv-titlebar:hover .title-edit { opacity:0.8; }
+  .title-edit:hover { color:var(--accent); opacity:1 !important; background:#1a2229; }
+  #renameInput { background:var(--code-bg); color:var(--fg); border:1px solid var(--accent); border-radius:8px; padding:6px 12px; font-size:15px; font-weight:600; min-width:300px; flex:1; max-width:600px; font-family:inherit; outline:none; }
+
   /* Bash 터미널 카드 */
   .toolcall.bash { background:#0a0e14; border-color:#1a2229; }
   .toolcall.bash summary { background:#0d1218; border-bottom:1px solid #1a2229; }
@@ -478,7 +489,7 @@ async function loadSessions() {
   qs("#sessionCount").textContent = sessions.length;
   qs("#sessions").innerHTML = sessions.length ? sessions.map(s => {
     const projName = (s.cwd || "").split("/").filter(Boolean).slice(-2).join("/") || "—";
-    const title = s.first_user_msg || s.session_id;
+    const title = s.custom_name || s.first_user_msg || s.session_id;
     return `
       <div class="item ${s.session_id === selectedSession ? "active" : ""}" data-sid="${s.session_id}">
         <div class="name"><span class="text">💬 ${escapeHtml(title.slice(0, 80))}</span></div>
@@ -544,8 +555,17 @@ async function loadDetail() {
 
   const projName = (s.cwd || "").split("/").filter(Boolean).slice(-1)[0] || "";
 
+  // 세션 제목 (custom_name 우선, 없으면 첫 사용자 메시지)
+  const autoTitle = (visibleMessages.find(m => m.role === 'user' && m.text)?.text || s.session_id).slice(0, 100);
+  const displayTitle = s.custom_name || autoTitle;
+
   // Build conv with filter row + grouped by day
   const toolbar = `
+    <div class="conv-titlebar">
+      <h2 id="sessionTitle" class="${s.custom_name ? "custom" : ""}" title="클릭하여 이름 변경">${escapeHtml(displayTitle)}</h2>
+      <button class="title-edit" id="renameBtn" title="이름 변경">✏️</button>
+      <span class="pill" style="margin-left:auto">${escapeHtml(s.model || "—")}</span>
+    </div>
     <div class="conv-toolbar">
       <button class="tb">← 이전</button>
       <button class="tb on" style="background:var(--accent-soft);border-color:var(--accent);color:#bfdbfe">내용</button>
@@ -617,6 +637,45 @@ async function loadDetail() {
   // 마크다운 복사 활성화
   qs("#copyMd").disabled = false;
   qs("#copyMd").onclick = () => copySessionAsMarkdown(s, visibleMessages);
+
+  // 세션 이름 변경
+  const titleEl = qs("#sessionTitle");
+  const renameBtn = qs("#renameBtn");
+  const startRename = () => {
+    if (titleEl.querySelector("input")) return;
+    const cur = s.custom_name || "";
+    const placeholder = autoTitle;
+    titleEl.innerHTML = `<input type="text" id="renameInput" maxlength="200" value="${escapeHtml(cur)}" placeholder="${escapeHtml(placeholder)}" style="background:var(--code-bg);color:var(--fg);border:1px solid var(--accent);border-radius:8px;padding:6px 12px;font-size:14px;font-weight:600;width:520px;font-family:inherit"/>`;
+    const input = qs("#renameInput");
+    input.focus(); input.select();
+    const cancel = () => { input.removeEventListener("blur", commit); titleEl.innerHTML = escapeHtml(s.custom_name || autoTitle); };
+    const commit = async () => {
+      const newName = input.value.trim();
+      if (newName === (s.custom_name || "")) return cancel();
+      try {
+        const r = await fetch(withToken(`/api/sessions/${selectedSession}/name`), {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: newName })
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        s.custom_name = newName || null;
+        titleEl.innerHTML = escapeHtml(newName || autoTitle);
+        titleEl.classList.toggle("custom", !!newName);
+        // 좌측 세션 리스트도 갱신
+        loadSessions();
+      } catch (e) {
+        alert("이름 변경 실패: " + e.message);
+        cancel();
+      }
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); commit(); }
+      else if (e.key === "Escape") { e.preventDefault(); cancel(); }
+    });
+    input.addEventListener("blur", commit);
+  };
+  titleEl.addEventListener("click", startRename);
+  renameBtn.addEventListener("click", startRename);
 
   // 디폴트: 가장 최근 메시지로 스크롤
   requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });

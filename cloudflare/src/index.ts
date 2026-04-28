@@ -204,7 +204,8 @@ app.get("/api/sessions", async (c) => {
            COUNT(*) events,
            SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens,
            SUM(cache_read_tokens) cache_read_tokens, SUM(cache_create_tokens) cache_create_tokens,
-           (SELECT text FROM messages WHERE session_id = events.session_id AND role = 'user' AND text IS NOT NULL ORDER BY seq ASC LIMIT 1) first_user_msg
+           (SELECT text FROM messages WHERE session_id = events.session_id AND role = 'user' AND text IS NOT NULL ORDER BY seq ASC LIMIT 1) first_user_msg,
+           (SELECT name FROM sessions_meta WHERE session_id = events.session_id) custom_name
     FROM events WHERE ${filters.join(" AND ")}
     GROUP BY session_id ORDER BY last_event DESC LIMIT ?
   `).bind(...params).all<any>();
@@ -213,18 +214,43 @@ app.get("/api/sessions", async (c) => {
   return c.json(rows);
 });
 
+// 세션 이름 변경
+app.put("/api/sessions/:id/name", async (c) => {
+  const actor = c.get("actor");
+  const sid = c.req.param("id");
+  const body = await c.req.json<any>().catch(() => ({}));
+  const name = (body.name || "").toString().trim().slice(0, 200);
+  const head: any = await c.env.DB.prepare(
+    "SELECT MAX(user_email) user_email, MAX(team) team FROM events WHERE session_id = ?"
+  ).bind(sid).first();
+  if (!head?.user_email) return c.json({ error: "session not found" }, 404);
+  if (!canSeeUser(actor, head.user_email, head.team)) return c.json({ error: "forbidden" }, 403);
+  if (name) {
+    await c.env.DB.prepare(
+      `INSERT INTO sessions_meta (session_id, name, updated_by, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET name=excluded.name, updated_by=excluded.updated_by, updated_at=excluded.updated_at`
+    ).bind(sid, name, actor.email, new Date().toISOString()).run();
+  } else {
+    await c.env.DB.prepare("DELETE FROM sessions_meta WHERE session_id = ?").bind(sid).run();
+  }
+  await audit(c.env, actor, "rename_session", head.user_email, sid, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: true, session_id: sid, name });
+});
+
 app.get("/api/sessions/:id/messages", async (c) => {
   const actor = c.get("actor");
   const sid = c.req.param("id");
   const head = await c.env.DB.prepare(`
-    SELECT session_id, MAX(user_email) user_email, MAX(user_name) user_name,
-           MAX(team) team, MAX(cwd) cwd, MAX(model) model,
-           MAX(host) host, MAX(platform) platform,
-           MAX(client_ip) client_ip, MAX(client_city) client_city, MAX(client_country) client_country,
-           MIN(ts) started, MAX(ts) last_event,
-           SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens,
-           SUM(cache_read_tokens) cache_read_tokens, SUM(cache_create_tokens) cache_create_tokens
-    FROM events WHERE session_id = ?
+    SELECT e.session_id, MAX(e.user_email) user_email, MAX(e.user_name) user_name,
+           MAX(e.team) team, MAX(e.cwd) cwd, MAX(e.model) model,
+           MAX(e.host) host, MAX(e.platform) platform,
+           MAX(e.client_ip) client_ip, MAX(e.client_city) client_city, MAX(e.client_country) client_country,
+           MIN(e.ts) started, MAX(e.ts) last_event,
+           SUM(e.input_tokens) input_tokens, SUM(e.output_tokens) output_tokens,
+           SUM(e.cache_read_tokens) cache_read_tokens, SUM(e.cache_create_tokens) cache_create_tokens,
+           (SELECT name FROM sessions_meta WHERE session_id = e.session_id) custom_name
+    FROM events e WHERE e.session_id = ?
   `).bind(sid).first<any>();
 
   if (head && !canSeeUser(actor, head.user_email, head.team)) {
