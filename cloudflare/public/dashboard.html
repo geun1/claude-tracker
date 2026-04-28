@@ -258,8 +258,42 @@ function buildQuery(extra = {}) {
 async function api(path) {
   const url = `${path}${path.includes("?") ? "&" : "?"}${buildQuery()}`;
   const r = await fetch(url);
+  if (r.status === 401) {
+    // 토큰이 없거나 만료/회수됨 → 사용자 안내 + 모달 자동 오픈
+    const cur = localStorage.getItem(tokenKey);
+    if (!cur) showLoginPrompt();
+    throw new Error(`인증 필요 (토큰 ${cur ? "재설정" : "입력"}이 필요합니다)`);
+  }
   if (!r.ok) throw new Error(`HTTP ${r.status} on ${path}`);
   return r.json();
+}
+
+function showLoginPrompt() {
+  if (qs("#loginPrompt")) return;  // 이미 떠있으면 skip
+  const modal = document.createElement("div");
+  modal.id = "loginPrompt";
+  modal.style.cssText = "position:fixed;inset:0;background:#000c;z-index:100;display:flex;align-items:center;justify-content:center";
+  modal.innerHTML = `
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px;max-width:520px;width:90%">
+      <h3 style="margin:0 0 8px;font-size:18px">🔑 인증 토큰 필요</h3>
+      <p style="margin:0 0 18px;color:var(--mute);font-size:13px;line-height:1.6">
+        대시보드를 보려면 본인의 API 토큰이 필요합니다.<br/>
+        토큰은 <code style="color:#f0abfc;background:var(--code-bg);padding:2px 7px;border-radius:5px;font-size:11.5px">~/.claude/tracker.json</code>의 <code style="color:#f0abfc;background:var(--code-bg);padding:2px 7px;border-radius:5px;font-size:11.5px">token</code> 필드에 있습니다.
+      </p>
+      <input id="loginToken" type="password" placeholder="토큰 붙여넣기..." style="width:100%;background:var(--code-bg);color:var(--fg);border:1px solid var(--line);padding:10px 14px;border-radius:8px;font-family:ui-monospace,monospace;font-size:12px;margin-bottom:14px" autofocus />
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn" id="loginCancel">취소</button>
+        <button class="btn" id="loginOk" style="background:var(--accent);color:#000;border-color:var(--accent)">접속</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const submit = () => {
+    const t = qs("#loginToken").value.trim();
+    if (t) { localStorage.setItem(tokenKey, t); location.reload(); }
+  };
+  qs("#loginOk").onclick = submit;
+  qs("#loginToken").addEventListener("keydown", e => { if (e.key === "Enter") submit(); });
+  qs("#loginCancel").onclick = () => modal.remove();
 }
 function withTokenRaw(path) {
   const t = qs("#token").value.trim();

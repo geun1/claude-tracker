@@ -167,8 +167,19 @@
   .codeblk { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:12px; background:var(--code-bg); border-radius:8px; padding:12px 14px; overflow-x:auto; margin:0; color:#cdd9e5; line-height:1.6; white-space:pre; border:1px solid var(--line); }
 
   /* Turn 구조 — 사용자 질문 + (에이전트 작업) + 최종 답변 */
-  .turn { margin-bottom:36px; padding-bottom:8px; border-bottom:1px dashed #1a2229; }
+  .turn { position:relative; margin-bottom:36px; padding-bottom:8px; border-bottom:1px dashed #1a2229; }
   .turn:last-child { border-bottom:none; }
+
+  /* 턴 복사 버튼 (우상단, hover 시 강조) */
+  .turn-copy {
+    position:absolute; top:0; right:24px; z-index:2;
+    background:var(--panel-2); border:1px solid var(--line); color:var(--mute);
+    padding:5px 10px; border-radius:8px; font-size:11px; cursor:pointer;
+    opacity:0.55; transition:opacity .15s, color .15s, border-color .15s;
+  }
+  .turn:hover .turn-copy { opacity:1; }
+  .turn-copy:hover { color:var(--accent); border-color:var(--accent); background:var(--panel); }
+  .turn-copy.done { color:var(--asst); border-color:var(--asst); opacity:1; }
 
   /* 에이전트 작업 드롭다운 */
   details.turn-work { margin:14px 0; border:1px solid var(--line); border-radius:12px; background:linear-gradient(180deg, var(--panel-2), var(--panel)); overflow:hidden; }
@@ -555,6 +566,7 @@ async function loadDetail() {
 
   // 턴으로 그룹: 사용자 질문 → 에이전트 중간작업 → 최종 답변
   const turns = groupIntoTurns(visibleMessages);
+  window._turns = turns;  // 복사 버튼이 참조
 
   // Group by day with separators
   let bodyHtml = '<div class="conv-body" id="convBody">';
@@ -562,7 +574,8 @@ async function loadDetail() {
   const todayStr = fmtDay(new Date().toISOString());
   const yestDate = new Date(); yestDate.setDate(yestDate.getDate() - 1);
   const yestStr = fmtDay(yestDate.toISOString());
-  for (const turn of turns) {
+  for (let ti = 0; ti < turns.length; ti++) {
+    const turn = turns[ti];
     const anchor = turn.user || turn.final || turn.work[0];
     if (!anchor) continue;
     const day = fmtDay(anchor.ts);
@@ -571,7 +584,7 @@ async function loadDetail() {
       bodyHtml += `<div class="day-sep"><div class="line"></div><span class="label">${escapeHtml(fmtDate(anchor.ts))}${rel ? ` <span class="rel">· ${rel}</span>` : ""}</span><div class="line"></div></div>`;
       lastDay = day;
     }
-    bodyHtml += renderTurn(turn);
+    bodyHtml += renderTurn(turn, ti);
   }
   bodyHtml += '</div>';
 
@@ -608,21 +621,76 @@ async function loadDetail() {
   // 디폴트: 가장 최근 메시지로 스크롤
   requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
 
-  // Toggle "더 보기"
-  scroll.addEventListener("click", (e) => {
-    if (e.target.classList.contains("more-btn")) {
-      e.preventDefault();
-      const wrap = e.target.previousElementSibling;
+  // Toggle "더 보기" + turn 복사 버튼 — onclick으로 재정의 (중복 리스너 방지)
+  scroll.onclick = (e) => {
+    const moreBtn = e.target.closest(".more-btn");
+    if (moreBtn) {
+      e.preventDefault(); e.stopPropagation();
+      const wrap = moreBtn.previousElementSibling;
+      if (!wrap || !wrap.classList.contains("collapsible")) return;
       const nowCollapsed = wrap.classList.toggle("collapsed");
-      e.target.innerHTML = nowCollapsed ? "▾ 더 보기..." : "▴ 접기";
+      moreBtn.innerHTML = nowCollapsed ? "▾ 더 보기..." : "▴ 접기";
+      return;
     }
-  });
+    const copyBtn = e.target.closest(".turn-copy");
+    if (copyBtn) {
+      e.preventDefault(); e.stopPropagation();
+      const idx = parseInt(copyBtn.dataset.turn, 10);
+      const turn = window._turns?.[idx];
+      if (!turn) return;
+      copyTurnPair(turn, copyBtn);
+    }
+  };
+}
+
+function copyTurnPair(turn, btn) {
+  const out = [];
+  if (turn.user) {
+    const q = stripSystemBlocks(turn.user.text);
+    if (q) {
+      out.push("## 사용자");
+      out.push("");
+      out.push(q);
+      out.push("");
+    }
+  }
+  if (turn.final) {
+    out.push("## Claude");
+    out.push("");
+    out.push(turn.final.text || "");
+  }
+  const text = out.join("\n");
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = "✓ 복사됨";
+    btn.classList.add("done");
+    setTimeout(() => { btn.textContent = orig; btn.classList.remove("done"); }, 1500);
+  }).catch(() => { btn.textContent = "✗ 실패"; });
+}
+
+// Claude Code transcript에는 사용자가 안 친 시스템성 메시지가 user role로 들어옴.
+// 진짜 사용자 입력만 추출하기 위해 시스템 블록을 걸러낸다.
+function stripSystemBlocks(text) {
+  if (!text) return "";
+  return text
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "")
+    .replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/gi, "")
+    .replace(/<command-name>[\s\S]*?<\/command-name>/gi, "")
+    .replace(/<command-message>[\s\S]*?<\/command-message>/gi, "")
+    .replace(/<command-args>[\s\S]*?<\/command-args>/gi, "")
+    .replace(/<command-stdout>[\s\S]*?<\/command-stdout>/gi, "")
+    .replace(/<command-stderr>[\s\S]*?<\/command-stderr>/gi, "")
+    .replace(/<bash-input>[\s\S]*?<\/bash-input>/gi, "")
+    .replace(/<bash-stdout>[\s\S]*?<\/bash-stdout>/gi, "")
+    .replace(/<bash-stderr>[\s\S]*?<\/bash-stderr>/gi, "")
+    .replace(/<task-notification>[\s\S]*?<\/task-notification>/gi, "")
+    .trim();
 }
 
 // 메시지를 턴 단위로 그룹: 사용자질문 → 중간작업 → 최종답변
 function groupIntoTurns(messages) {
-  // "진짜" 사용자 질문: role=user + 본문 있음 + tool_result 아님
-  const isRealUser = (m) => m.role === "user" && m.text && m.text.trim() && !m.tool_result;
+  // "진짜" 사용자 질문: role=user + 시스템 블록 제거 후 본문 있음 + tool_result 아님
+  const isRealUser = (m) => m.role === "user" && stripSystemBlocks(m.text).length > 0 && !m.tool_result;
   const turns = [];
   let cur = null;
   for (const m of messages) {
@@ -663,8 +731,10 @@ function groupIntoTurns(messages) {
   return turns;
 }
 
-function renderTurn(turn) {
-  let html = '<div class="turn">';
+function renderTurn(turn, idx = 0) {
+  // 사용자 질문 + 최종 답변이 모두 있을 때만 복사 버튼 표시
+  const hasPair = !!turn.user && !!turn.final;
+  let html = `<div class="turn">${hasPair ? `<button type="button" class="turn-copy" data-turn="${idx}" title="질문 + 최종 답변 복사">📋 복사</button>` : ""}`;
 
   // 1) 사용자 질문 (있으면)
   if (turn.user) html += renderMsg(turn.user);
@@ -711,10 +781,11 @@ function renderTurn(turn) {
 function shouldCollapse(text) { return text && text.length > 320; }
 
 function renderTextMaybeCollapsed(text, isUser=false) {
-  // 사용자 메시지도 마크다운 렌더링 (코드 펜스, 링크, 인라인 코드 등은 사용자도 자주 씀)
-  const html = renderMd(text);
-  if (!shouldCollapse(text)) return `<div class="text">${html}</div>`;
-  return `<div class="text collapsible collapsed">${html}</div><button class="more-btn">▾ 더 보기...</button>`;
+  // 사용자 메시지에서는 시스템 블록 제거 후 렌더링
+  const cleaned = isUser ? stripSystemBlocks(text) : text;
+  const html = renderMd(cleaned);
+  if (!shouldCollapse(cleaned)) return `<div class="text">${html}</div>`;
+  return `<div class="text collapsible collapsed">${html}</div><button type="button" class="more-btn">▾ 더 보기...</button>`;
 }
 
 function renderMsg(m, opts = {}) {
