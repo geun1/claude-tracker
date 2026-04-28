@@ -780,14 +780,15 @@ fi
 echo
 # 4) settings.json에 hooks 자동 머지 — Claude Code 재시작만 하면 즉시 추적 시작
 SETTINGS="\$HOME/.claude/settings.json"
-HOOK_FILE="\$PLUGIN_DIR/hooks/hooks.json"
+HOOK_FILE="\$PLUGIN_DIR/plugin/hooks/hooks.json"
+PLUGIN_INNER="\$PLUGIN_DIR/plugin"
 if command -v node >/dev/null && [ -f "\$HOOK_FILE" ]; then
   bold "🪝 ~/.claude/settings.json에 hooks 자동 등록..."
   node -e "
     const fs = require('fs');
     const path = require('path');
     const settingsPath = '\$SETTINGS';
-    const pluginDir = '\$PLUGIN_DIR';
+    const pluginDir = '\$PLUGIN_INNER';
     const hookFile = '\$HOOK_FILE';
     let settings = {};
     try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
