@@ -47,6 +47,7 @@ app.get("/dashboard.html", (c) => c.env.ASSETS.fetch(c.req.raw));
 app.get("/sessions.html", (c) => c.env.ASSETS.fetch(c.req.raw));
 app.get("/profile.html", (c) => c.env.ASSETS.fetch(c.req.raw));
 app.get("/health", (c) => c.json({ ok: true, environment: (c.env as any).ENVIRONMENT || "unknown" }));
+app.get("/favicon.ico", () => new Response(null, { status: 204 }));
 
 // ── Auth middleware (skip for static) ──────────────────────────────────────
 const PUBLIC_API = new Set(["/api/signup"]);
