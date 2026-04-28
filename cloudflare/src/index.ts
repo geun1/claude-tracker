@@ -934,7 +934,7 @@ app.post("/api/users/:email/analyze-pending", async (c) => {
   const actor = c.get("actor");
   const email = c.req.param("email");
   if (email !== actor.email && !isAdmin(actor)) return c.json({ error: "forbidden" }, 403);
-  if (!c.env.ANTHROPIC_API_KEY) return c.json({ error: "ANTHROPIC_API_KEY missing" }, 500);
+  if (!c.env.GEMINI_API_KEY) return c.json({ error: "GEMINI_API_KEY missing" }, 500);
   const days = Math.max(1, parseInt(c.req.query("days") || "7", 10));
   const limit = Math.min(20, parseInt(c.req.query("limit") || "10", 10));
   const since = new Date(Date.now() - days * 86400_000).toISOString();
