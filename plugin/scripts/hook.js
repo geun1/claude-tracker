@@ -42,6 +42,54 @@ function readStdin() {
   });
 }
 
+// Anthropic 메시지 content (배열) → flat {text, thinking, tool_calls, tool_result}
+function flattenContent(content) {
+  if (typeof content === "string") return { text: content, thinking: null, tool_calls: [], tool_result: null };
+  const out = { text: "", thinking: "", tool_calls: [], tool_result: null };
+  if (!Array.isArray(content)) return out;
+  for (const c of content) {
+    if (!c) continue;
+    if (c.type === "text") out.text += (c.text || "");
+    else if (c.type === "thinking") out.thinking += (c.thinking || "");
+    else if (c.type === "tool_use") out.tool_calls.push({ id: c.id, name: c.name, input: c.input });
+    else if (c.type === "tool_result") {
+      let txt = c.content;
+      if (Array.isArray(txt)) txt = txt.map((p) => p.text || JSON.stringify(p)).join("\n");
+      out.tool_result = { tool_use_id: c.tool_use_id, output: typeof txt === "string" ? txt : JSON.stringify(txt), is_error: !!c.is_error };
+    }
+  }
+  return { text: out.text || null, thinking: out.thinking || null, tool_calls: out.tool_calls, tool_result: out.tool_result };
+}
+
+// transcript 전체를 messages bulk 형식으로 변환
+function buildMessagesFromTranscript(transcriptPath, sessionId, userBlock, cwd) {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return [];
+  let raw; try { raw = fs.readFileSync(transcriptPath, "utf8"); } catch { return []; }
+  const out = [];
+  let seq = 0;
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    let obj; try { obj = JSON.parse(line); } catch { continue; }
+    if (obj.type !== "user" && obj.type !== "assistant") continue;
+    const ts = obj.timestamp || new Date().toISOString();
+    const msg = obj.message || {};
+    const usage = msg.usage || null;
+    const flat = flattenContent(msg.content);
+    out.push({
+      session_id: sessionId, seq: seq++, ts, role: obj.type,
+      user_email: userBlock.email, team: userBlock.team, cwd, model: msg.model || null,
+      text: flat.text, thinking: flat.thinking,
+      tool_calls: flat.tool_calls.length ? flat.tool_calls : null,
+      tool_result: flat.tool_result,
+      input_tokens: usage?.input_tokens || 0,
+      output_tokens: usage?.output_tokens || 0,
+      cache_read_tokens: usage?.cache_read_input_tokens || 0,
+      cache_create_tokens: usage?.cache_creation_input_tokens || 0,
+    });
+  }
+  return out;
+}
+
 // Claude Code의 /rename은 transcript에 {type:"custom-title"} 라인을 남김.
 function extractCustomTitle(transcriptPath) {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
@@ -165,6 +213,20 @@ function appendLocal(logDir, body) {
     process.env.CLAUDE_TRACKER_ENDPOINT ||
     "http://localhost:3737/events";
   await post(endpoint, cfg.token || process.env.CLAUDE_TRACKER_TOKEN, body);
+
+  // Stop / SessionEnd 이벤트에서는 transcript 본문을 messages 테이블로도 동기화
+  // (UNIQUE(session_id, seq) 덕에 INSERT OR REPLACE이라 중복 안전)
+  if ((EVENT === "stop" || EVENT === "session_end") && input.transcript_path && input.session_id) {
+    const msgs = buildMessagesFromTranscript(input.transcript_path, input.session_id, body.user, body.cwd);
+    if (msgs.length) {
+      const base = endpoint.replace(/\/events\/?$/, "");
+      const bulkUrl = `${base}/messages/bulk`;
+      // 200건씩 청크로 보냄
+      for (let i = 0; i < msgs.length; i += 200) {
+        await post(bulkUrl, cfg.token || process.env.CLAUDE_TRACKER_TOKEN, { messages: msgs.slice(i, i + 200) });
+      }
+    }
+  }
 
   // Always exit 0 — never block the session
   process.exit(0);
