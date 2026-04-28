@@ -722,6 +722,15 @@ app.post("/api/integrations/jira", async (c) => {
   return c.json({ ok: true, projectsCount: ping.projectsCount, displayName: ping.user?.displayName });
 });
 
+// Debug: 본인 Jira 미완료 티켓 미리보기 (LLM 컨텍스트로 들어가는 그 목록)
+app.get("/api/integrations/jira/tickets", async (c) => {
+  const actor = c.get("actor");
+  const conn = await getJiraConn(c.env, actor.email);
+  if (!conn) return c.json({ ok: false, error: "no jira connection saved" });
+  const tickets = await fetchAssignedOpen(conn, 50);
+  return c.json({ ok: true, base_url: conn.base_url, count: tickets.length, tickets });
+});
+
 app.delete("/api/integrations/jira", async (c) => {
   const actor = c.get("actor");
   await c.env.DB.prepare("DELETE FROM user_integrations WHERE user_email = ? AND kind = 'jira'").bind(actor.email).run();

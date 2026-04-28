@@ -39,20 +39,35 @@ export async function fetchTicket(c: JiraConn, key: string): Promise<any | null>
   } catch { return null; }
 }
 
-// 사용자가 담당자인 미완료 티켓 목록 (LLM 컨텍스트용)
-export async function fetchAssignedOpen(c: JiraConn, max = 30): Promise<any[]> {
-  try {
-    const url = c.base_url.replace(/\/$/, "");
-    const jql = encodeURIComponent('assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC');
-    const r = await fetch(`${url}/rest/api/3/search?jql=${jql}&maxResults=${max}&fields=summary,status`,
-      { headers: authHeader(c) });
-    if (!r.ok) return [];
-    const j = await r.json<any>();
-    return (j.issues || []).map((i: any) => ({
-      key: i.key,
-      summary: i.fields?.summary || "",
-      status: i.fields?.status?.name || "",
-      url: `${url}/browse/${i.key}`,
-    }));
-  } catch { return []; }
+// 사용자와 관련된 미완료 티켓 (LLM 컨텍스트용).
+// assignee/reporter/watcher 또는 최근 update 본 티켓까지 폭넓게.
+export async function fetchAssignedOpen(c: JiraConn, max = 50): Promise<any[]> {
+  const url = c.base_url.replace(/\/$/, "");
+  const queries = [
+    // 1. 본인 담당/보고/관전 + 미완료
+    '(assignee = currentUser() OR reporter = currentUser() OR watcher = currentUser()) AND statusCategory != Done ORDER BY updated DESC',
+    // 2. 폴백: 최근 30일 내 자신이 활동한 모든 티켓
+    'updated >= -30d AND (assignee = currentUser() OR reporter = currentUser()) ORDER BY updated DESC',
+    // 3. 마지막 폴백: 최근 14일 내 모든 미완료 티켓 (좁은 워크스페이스용)
+    'updated >= -14d AND statusCategory != Done ORDER BY updated DESC',
+  ];
+  for (const jql of queries) {
+    try {
+      const r = await fetch(
+        `${url}/rest/api/3/search?jql=${encodeURIComponent(jql)}&maxResults=${max}&fields=summary,status,assignee`,
+        { headers: authHeader(c) }
+      );
+      if (!r.ok) continue;
+      const j = await r.json<any>();
+      const issues = (j.issues || []).map((i: any) => ({
+        key: i.key,
+        summary: i.fields?.summary || "",
+        status: i.fields?.status?.name || "",
+        assignee: i.fields?.assignee?.displayName || null,
+        url: `${url}/browse/${i.key}`,
+      }));
+      if (issues.length) return issues;
+    } catch {}
+  }
+  return [];
 }
