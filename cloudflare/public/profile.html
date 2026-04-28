@@ -88,6 +88,7 @@
     main, header { padding:18px; }
   }
 </style>
+<script src="/loader.js"></script>
 </head>
 <body>
 <header>
@@ -179,16 +180,34 @@ async function load() {
     const dCost = delta(totalCost, prevCost);
     const dSess = delta(sessions.length, prevSessions);
 
+    let registered = null;
+    try { registered = await api(`/api/users/${encodeURIComponent(email)}/registered-plan`); } catch {}
+    const PLAN_LABEL_P = { "pro":"Pro ($20)","max-5x":"Max 5× ($100)","max-20x":"Max 20× ($200)","team":"Team ($25)","api":"API 종량제" };
+    const PLAN_COLOR_P = { "pro":"#60a5fa","max-5x":"#fcd34d","max-20x":"#fb923c","team":"#86efac","api":"#f0abfc" };
+    const cur = registered?.plan || "";
+    const planOpts = ["", "pro", "max-5x", "max-20x", "team", "api"].map(p =>
+      `<option value="${p}" ${p===cur?"selected":""}>${p ? PLAN_LABEL_P[p] : "(미등록)"}</option>`).join("");
+    const planBadgeHtml = cur
+      ? `<span class="pill" style="border:1px solid ${PLAN_COLOR_P[cur]}55;color:${PLAN_COLOR_P[cur]}">${PLAN_LABEL_P[cur]}</span>`
+      : `<span class="pill" style="opacity:.6">플랜 미등록</span>`;
+
     qs("#main").innerHTML = `
-      <div class="profile-head">
+      <div class="profile-head" style="display:flex;align-items:center;gap:14px">
         <div class="avatar">${escapeHtml((email[0] || "?").toUpperCase())}</div>
         <div class="info">
           <div class="name">${escapeHtml(email)}</div>
           <div class="meta">
             ${meta.team ? `<span class="pill team">${escapeHtml(meta.team)}</span>` : ""}
+            ${planBadgeHtml}
             ${plan.inference?.tier ? `<span class="pill">${plan.inference.tier} 사용자</span>` : ""}
             <span style="margin-left:8px">${days}일 통계</span>
           </div>
+        </div>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+          <label style="font-size:12px;color:#9aa3b2">등록 플랜</label>
+          <select id="planSel" style="background:#161b22;color:#e6edf3;border:1px solid #1c222b;padding:6px 10px;border-radius:6px">${planOpts}</select>
+          <button id="planSave" style="background:#3b82f6;color:#fff;border:0;padding:6px 12px;border-radius:6px;cursor:pointer">저장</button>
+          <span id="planMsg" style="font-size:12px;color:#9aa3b2"></span>
         </div>
       </div>
 
@@ -287,6 +306,26 @@ async function load() {
         </div>
       </div>
     `;
+
+    // Wire plan save
+    qs("#planSave")?.addEventListener("click", async () => {
+      const v = qs("#planSel").value || null;
+      const msg = qs("#planMsg");
+      msg.textContent = "저장 중…";
+      try {
+        const tk = localStorage.getItem(tokenKey);
+        const r = await fetch(withToken(`/api/users/${encodeURIComponent(email)}/registered-plan`), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", ...(tk ? { Authorization: "Bearer " + tk } : {}) },
+          body: JSON.stringify({ plan: v }),
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        msg.style.color = "#86efac"; msg.textContent = "✓ 저장됨";
+        setTimeout(load, 600);
+      } catch (e) {
+        msg.style.color = "#fca5a5"; msg.textContent = "⚠ " + e.message;
+      }
+    });
 
     // Render trend chart
     drawTrend(ts365.rows || []);

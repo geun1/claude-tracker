@@ -121,6 +121,7 @@
     main { padding:18px; }
   }
 </style>
+<script src="/loader.js"></script>
 </head>
 <body>
 <header>
@@ -136,6 +137,8 @@
   </select>
   <select id="teamFilter"><option value="">전체 팀</option></select>
   <input id="token" placeholder="토큰" size="14" style="display:none" />
+  <input id="dailyDate" type="date" />
+  <button class="btn" onclick="loadDaily()">📅 일일 보드</button>
   <a class="btn" href="/browse">세션 뷰어 →</a>
   <a class="btn" id="csvLink" href="#">CSV ↓</a>
   <button class="btn" id="accountBtn" title="계정 설정">⚙</button>
@@ -229,6 +232,12 @@
         <tbody></tbody>
       </table>
     </div>
+  </div>
+
+  <!-- 일일 보드 (admin) -->
+  <div class="section" id="dailySec" style="display:none">
+    <h2 style="font-size:14px;margin:6px 0 12px;color:#9aa3b2;text-transform:uppercase;letter-spacing:.06em">📅 일일 보드 — <span id="dailyLabel"></span></h2>
+    <div id="dailyBody"></div>
   </div>
 </main>
 
@@ -667,6 +676,68 @@ function openAccount() {
     if (confirm("로그아웃하시겠습니까?")) { localStorage.removeItem(tokenKey); location.reload(); }
   };
   modal.querySelector("#acctClose").onclick = () => modal.remove();
+}
+
+// 일일 보드 (admin 또는 manager 본인 팀)
+function todayKST(){ const d = new Date(Date.now() + 9*3600000); return d.toISOString().slice(0,10); }
+qs("#dailyDate").value = todayKST();
+
+async function loadDaily() {
+  const date = qs("#dailyDate").value || todayKST();
+  const sec = qs("#dailySec"); const body = qs("#dailyBody");
+  sec.style.display = "block";
+  body.innerHTML = '<div style="color:#9aa3b2">불러오는 중…</div>';
+  qs("#dailyLabel").textContent = date;
+  try {
+    const r = await fetch(withTokenRaw(`/api/admin/daily?date=${date}`));
+    if (!r.ok) throw new Error("HTTP " + r.status + " (admin 권한 필요)");
+    const data = await r.json();
+    const tok2 = qs("#token").value.trim();
+    const tq2 = tok2 ? `?token=${encodeURIComponent(tok2)}` : "";
+    body.innerHTML = (data.teams || []).map(t => `
+      <div style="margin-bottom:18px">
+        <h3 style="font-size:13px;margin:0 0 8px;color:#fb923c">
+          팀: <a href="/t/${encodeURIComponent(t.team)}${tq2}" style="color:#fb923c;text-decoration:none;border-bottom:1px dashed #fb923c66">${escapeHtml(t.team)}</a>
+          <span style="color:#9aa3b2;font-weight:400">· ${t.members.length}명</span>
+        </h3>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:10px">
+          ${t.members.map(m => renderDailyMember(m)).join("")}
+        </div>
+      </div>`).join("") || '<div style="color:#9aa3b2">데이터 없음</div>';
+  } catch (e) {
+    body.innerHTML = `<div style="color:#fca5a5">⚠ ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+const PLAN_LABEL = { "pro":"Pro","max-5x":"Max 5×","max-20x":"Max 20×","team":"Team","api":"API" };
+const PLAN_COLOR = { "pro":"#60a5fa","max-5x":"#fcd34d","max-20x":"#fb923c","team":"#86efac","api":"#f0abfc" };
+function planBadge(p){ if(!p) return '<span style="font-size:10px;color:#6b7280;margin-left:4px">미등록</span>'; const c=PLAN_COLOR[p]||"#9aa3b2"; return `<span style="font-size:10px;border:1px solid ${c}55;color:${c};padding:0 6px;border-radius:999px;margin-left:4px">${PLAN_LABEL[p]||p}</span>`; }
+function renderDailyMember(m) {
+  const tok = qs("#token").value.trim();
+  const tq = tok ? `?token=${encodeURIComponent(tok)}` : "";
+  const todo = (m.todo||[]).slice(0,5).map(t => `
+    <div style="font-size:12px;padding:4px 6px;background:#0d1015;border:1px solid #1f242c;border-radius:4px;margin-bottom:4px">
+      <span style="color:#fb923c;font-weight:600">${escapeHtml(t.key)}</span> ${escapeHtml((t.summary||"").slice(0,60))}
+      ${t.url ? `<a href="${t.url}" target="_blank" style="color:#60a5fa;margin-left:4px">↗</a>` : ""}
+    </div>`).join("") || '<div style="color:#6b7280;font-size:11px;font-style:italic">미완료 티켓 없음</div>';
+  const done = (m.done||[]).slice(0,5).map(d => `
+    <div style="font-size:12px;padding:4px 6px;background:#0d1015;border:1px solid #1f242c;border-radius:4px;margin-bottom:4px">
+      ${d.ticket_key ? `<span style="color:#fb923c;font-weight:600">${escapeHtml(d.ticket_key)}</span> ` : ""}
+      ${escapeHtml((d.summary||d.ticket_summary||"(분석)").slice(0,80))}
+    </div>`).join("") || '<div style="color:#6b7280;font-size:11px;font-style:italic">분석된 세션 없음</div>';
+  const st = m.stats || {};
+  return `
+    <div style="background:#11141a;border:1px solid #1f242c;border-radius:8px;padding:10px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:6px">
+        <a href="/u/${encodeURIComponent(m.email)}${tq}" style="color:#60a5fa;text-decoration:none">${escapeHtml(m.name||m.email)}</a>
+        ${planBadge(m.plan)}
+        <span style="color:#9aa3b2;font-weight:400;font-size:11px;margin-left:6px">세션 ${st.sessions||0} · ${fmtUSD(st.cost_usd)}</span>
+      </div>
+      <div style="font-size:11px;color:#9aa3b2;margin:4px 0 2px">📋 해야 할 일</div>
+      ${todo}
+      <div style="font-size:11px;color:#9aa3b2;margin:6px 0 2px">✅ 한 일</div>
+      ${done}
+    </div>`;
 }
 
 load();

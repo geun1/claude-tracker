@@ -268,6 +268,7 @@
   .skel .row { height:14px; background:linear-gradient(90deg,var(--panel),var(--panel-2),var(--panel)); background-size:200% 100%; border-radius:6px; margin-bottom:12px; animation:sh 1.4s infinite linear; }
   @keyframes sh { 0% {background-position:200% 0} 100% {background-position:-200% 0} }
 </style>
+<script src="/loader.js"></script>
 </head>
 <body>
 <header>
@@ -654,10 +655,25 @@ async function loadDetail() {
     titleEl.innerHTML = `<input type="text" id="renameInput" maxlength="200" value="${escapeHtml(cur)}" placeholder="${escapeHtml(placeholder)}" style="background:var(--code-bg);color:var(--fg);border:1px solid var(--accent);border-radius:8px;padding:6px 12px;font-size:14px;font-weight:600;width:520px;font-family:inherit"/>`;
     const input = qs("#renameInput");
     input.focus(); input.select();
-    const cancel = () => { input.removeEventListener("blur", commit); titleEl.innerHTML = escapeHtml(s.custom_name || autoTitle); };
+    let finished = false;
+    const safeSetTitle = (text) => {
+      // titleEl이 DOM에서 교체됐으면(loadSessions 등) 건드리지 않는다
+      if (titleEl.isConnected) titleEl.textContent = text;
+    };
+    const cleanup = () => {
+      input.removeEventListener("blur", onBlur);
+      input.removeEventListener("keydown", onKey);
+    };
+    const cancel = () => {
+      if (finished) return; finished = true;
+      cleanup();
+      safeSetTitle(s.custom_name || autoTitle);
+    };
     const commit = async () => {
+      if (finished) return; finished = true;
+      cleanup();
       const newName = input.value.trim();
-      if (newName === (s.custom_name || "")) return cancel();
+      if (newName === (s.custom_name || "")) { safeSetTitle(s.custom_name || autoTitle); return; }
       try {
         const r = await fetch(withToken(`/api/sessions/${selectedSession}/name`), {
           method: "PUT", headers: { "Content-Type": "application/json" },
@@ -665,20 +681,21 @@ async function loadDetail() {
         });
         if (!r.ok) throw new Error("HTTP " + r.status);
         s.custom_name = newName || null;
-        titleEl.innerHTML = escapeHtml(newName || autoTitle);
-        titleEl.classList.toggle("custom", !!newName);
-        // 좌측 세션 리스트도 갱신
+        safeSetTitle(newName || autoTitle);
+        if (titleEl.isConnected) titleEl.classList.toggle("custom", !!newName);
         loadSessions();
       } catch (e) {
         alert("이름 변경 실패: " + e.message);
-        cancel();
+        safeSetTitle(s.custom_name || autoTitle);
       }
     };
-    input.addEventListener("keydown", (e) => {
+    const onKey = (e) => {
       if (e.key === "Enter") { e.preventDefault(); commit(); }
       else if (e.key === "Escape") { e.preventDefault(); cancel(); }
-    });
-    input.addEventListener("blur", commit);
+    };
+    const onBlur = () => commit();
+    input.addEventListener("keydown", onKey);
+    input.addEventListener("blur", onBlur);
   };
   titleEl.addEventListener("click", startRename);
   renameBtn.addEventListener("click", startRename);

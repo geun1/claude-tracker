@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>팀 일일 보드 — claude-tracker</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root{--bg:#0b0d10;--card:#11141a;--bd:#1f242c;--mut:#9aa3b2;--fg:#e7e9ee;--orange:#fb923c;--g:#86efac;--y:#fcd34d;--r:#fca5a5}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}
+  header{padding:14px 22px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:#0d1015}
+  h1{font-size:16px;margin:0;font-weight:700}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border:1px solid var(--bd);border-radius:999px;background:#11141a;color:var(--mut);font-size:12px}
+  input,select,button{background:#11141a;color:var(--fg);border:1px solid var(--bd);border-radius:6px;padding:6px 10px;font:inherit}
+  button{cursor:pointer}
+  button.primary{background:var(--orange);color:#0b0d10;border-color:var(--orange);font-weight:600}
+  main{padding:22px;max-width:1400px;margin:0 auto}
+  h2{font-size:14px;margin:24px 0 10px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.06em}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}
+  .kpi{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px}
+  .kpi .num{font-size:22px;font-weight:700;color:var(--orange)}
+  .kpi .lab{color:var(--mut);font-size:12px}
+  .grid{display:grid;grid-template-columns:1fr;gap:14px}
+  .member{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px}
+  .member h3{margin:0 0 10px;font-size:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .member h3 .stat{color:var(--mut);font-size:12px;font-weight:400}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:8px}
+  .col h4{margin:0 0 6px;font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
+  .item{padding:8px 10px;background:#0d1015;border:1px solid var(--bd);border-radius:6px;margin-bottom:6px;font-size:13px}
+  .item .k{color:var(--orange);font-weight:600;margin-right:6px}
+  .item .s{color:var(--mut);font-size:11px;margin-left:6px}
+  .item a{color:#60a5fa;text-decoration:none}
+  .item a:hover{text-decoration:underline}
+  .empty{color:var(--mut);font-size:12px;font-style:italic;padding:6px 0}
+  .err{color:var(--r);padding:8px}
+  @media (max-width:780px){.cols{grid-template-columns:1fr}.kpis{grid-template-columns:1fr 1fr}}
+</style>
+<script src="/loader.js"></script>
+</head>
+<body>
+<header>
+  <h1>📅 <span id="teamName">팀</span> 일일 보드</h1>
+  <span id="meBox" class="pill" style="display:none"></span>
+  <span style="flex:1"></span>
+  <select id="teamSwitch" style="display:none"></select>
+  <input id="date" type="date" />
+  <button class="primary" onclick="load()">조회</button>
+  <a href="/" class="pill" style="text-decoration:none">← 홈</a>
+</header>
+<main>
+  <div class="kpis" id="kpis"></div>
+  <h2>멤버별 작업 현황</h2>
+  <div class="grid" id="members"></div>
+</main>
+<script>
+function tok(){
+  const u = new URL(location.href);
+  const fromUrl = u.searchParams.get("token");
+  if (fromUrl) { localStorage.setItem("claude-tracker-token", fromUrl); u.searchParams.delete("token"); history.replaceState({}, "", u.toString()); return fromUrl; }
+  return localStorage.getItem("claude-tracker-token") || "";
+}
+const T = tok();
+const TEAM = decodeURIComponent(location.pathname.split("/t/")[1] || "");
+document.getElementById("teamName").textContent = TEAM || "팀";
+
+function api(p){ return fetch(p, { headers: { Authorization: "Bearer " + T } }).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }); }
+function escapeHtml(s){ return String(s||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
+function fmtUSD(v){ return "$" + (Number(v||0)).toFixed(2); }
+function fmtMin(s, e){ if (!s||!e) return ""; const m = Math.round((new Date(e)-new Date(s))/60000); return m + "m"; }
+const PLAN_LABEL = { "pro":"Pro","max-5x":"Max 5×","max-20x":"Max 20×","team":"Team","api":"API" };
+const PLAN_COLOR = { "pro":"#60a5fa","max-5x":"#fcd34d","max-20x":"#fb923c","team":"#86efac","api":"#f0abfc" };
+function planBadge(p){ if(!p) return '<span class="stat" style="opacity:.6">플랜 미등록</span>'; const c=PLAN_COLOR[p]||"#9aa3b2"; return `<span class="stat" style="border:1px solid ${c}55;color:${c};padding:1px 8px;border-radius:999px">${PLAN_LABEL[p]||p}</span>`; }
+function todayKST(){ const d = new Date(Date.now() + 9*3600000); return d.toISOString().slice(0,10); }
+
+document.getElementById("date").value = todayKST();
+
+async function loadMe(){
+  try {
+    const me = await api("/api/me");
+    const c = me.role === "admin" ? "#fca5a5" : me.role === "manager" ? "#fcd34d" : "#86efac";
+    const b = document.getElementById("meBox");
+    b.style.display = "inline-flex";
+    b.innerHTML = `👤 ${escapeHtml(me.name||me.email)} · <span style="color:${c};margin-left:4px">${me.role}</span>`;
+    // 관리자는 팀 전환 가능
+    if (me.role === "admin") {
+      try {
+        const teams = await api("/teams");
+        const sel = document.getElementById("teamSwitch");
+        sel.innerHTML = (teams || []).map(t => `<option value="${escapeHtml(t.team)}" ${t.team===TEAM?"selected":""}>${escapeHtml(t.team)} (${t.users}명)</option>`).join("");
+        sel.style.display = "inline-block";
+        sel.addEventListener("change", () => {
+          const v = sel.value;
+          if (v && v !== TEAM) location.href = "/t/" + encodeURIComponent(v);
+        });
+      } catch {}
+    }
+  } catch {}
+}
+
+async function load(){
+  const date = document.getElementById("date").value || todayKST();
+  const cont = document.getElementById("members");
+  cont.innerHTML = '<div class="empty">불러오는 중…</div>';
+  try {
+    const data = await api(`/api/teams/${encodeURIComponent(TEAM)}/daily?date=${date}`);
+    renderKPIs(data);
+    renderMembers(data.members || []);
+  } catch (e) {
+    cont.innerHTML = `<div class="err">⚠ ${escapeHtml(e.message)} — 권한이 없거나 잘못된 팀일 수 있습니다.</div>`;
+    document.getElementById("kpis").innerHTML = "";
+  }
+}
+
+function renderKPIs(data){
+  const ms = data.members || [];
+  let cost = 0, sessions = 0, todo = 0, done = 0;
+  for (const m of ms) {
+    cost += (m.stats?.cost_usd || 0);
+    sessions += (m.stats?.sessions || 0);
+    todo += (m.todo?.length || 0);
+    done += (m.done?.length || 0);
+  }
+  document.getElementById("kpis").innerHTML = `
+    <div class="kpi"><div class="lab">멤버</div><div class="num">${ms.length}</div></div>
+    <div class="kpi"><div class="lab">오늘 세션</div><div class="num">${sessions}</div></div>
+    <div class="kpi"><div class="lab">분석 완료</div><div class="num">${done}</div></div>
+    <div class="kpi"><div class="lab">총 비용</div><div class="num">${fmtUSD(cost)}</div></div>
+  `;
+}
+
+function renderMembers(rows){
+  const cont = document.getElementById("members");
+  if (!rows.length) { cont.innerHTML = '<div class="empty">팀원이 없습니다.</div>'; return; }
+  cont.innerHTML = rows.map(m => {
+    const todo = (m.todo||[]).map(t => `
+      <div class="item">
+        <span class="k">${escapeHtml(t.key)}</span>${escapeHtml(t.summary||"")}
+        <span class="s">${escapeHtml(t.status||"")}</span>
+        ${t.url ? `<a href="${t.url}" target="_blank" class="s">↗</a>` : ""}
+      </div>
+    `).join("") || '<div class="empty">미완료 티켓 없음</div>';
+    const done = (m.done||[]).map(d => `
+      <div class="item">
+        ${d.ticket_key ? `<span class="k">${escapeHtml(d.ticket_key)}</span>` : ""}
+        ${escapeHtml(d.summary||d.ticket_summary||"(분석)")}
+        <span class="s">${fmtMin(d.started, d.last_event)} · ${fmtUSD(d.cost_usd)}</span>
+        <a class="s" href="/browse?session=${encodeURIComponent(d.session_id)}&token=${encodeURIComponent(T)}" target="_blank">↗</a>
+      </div>
+    `).join("") || '<div class="empty">분석된 세션 없음</div>';
+    const st = m.stats || {};
+    return `
+      <div class="member">
+        <h3>
+          <a href="/u/${encodeURIComponent(m.email)}?token=${encodeURIComponent(T)}" style="color:#60a5fa;text-decoration:none">${escapeHtml(m.name||m.email)}</a>
+          <span class="stat">${escapeHtml(m.email)}</span>
+          ${planBadge(m.plan)}
+          <span class="stat">· 세션 ${st.sessions||0} · ${fmtUSD(st.cost_usd)}</span>
+        </h3>
+        <div class="cols">
+          <div class="col"><h4>📋 해야 할 일 (Jira)</h4>${todo}</div>
+          <div class="col"><h4>✅ 한 일 (Claude Code)</h4>${done}</div>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+loadMe(); load();
+</script>
+</body>
+</html>

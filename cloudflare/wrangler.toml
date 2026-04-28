@@ -35,6 +35,9 @@ binding = "ASSETS"
 # Run the Worker first so API routes like /sessions, /users, /teams take
 # precedence over similarly-named static files (sessions.html, users.html…).
 run_worker_first = true
+# Disable auto .html stripping so /dashboard.html?token=… is not 307-redirected
+# (the redirect drops the query string, breaking SSO/token flow).
+html_handling = "none"
 
 # ── Scheduled tasks (retention + masking sweep) ─────────────────────────────
 # Account is at the 5-cron limit; run retention manually via

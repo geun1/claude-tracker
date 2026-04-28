@@ -38,14 +38,18 @@ type Env = {
 const app = new Hono<{ Bindings: Env; Variables: { actor: Actor } }>();
 
 // ── Static dashboard ───────────────────────────────────────────────────────
-app.get("/", (c) => c.env.ASSETS.fetch(new Request(new URL("/dashboard.html", c.req.url))));
+app.get("/", (c) => c.env.ASSETS.fetch(new Request(new URL("/home.html", c.req.url))));
 app.get("/browse", (c) => c.env.ASSETS.fetch(new Request(new URL("/sessions.html", c.req.url))));
 app.get("/u/:email", (c) => c.env.ASSETS.fetch(new Request(new URL("/profile.html", c.req.url))));
+app.get("/t/:team", (c) => c.env.ASSETS.fetch(new Request(new URL("/team.html", c.req.url))));
 app.get("/p/:slug{.+}", (c) => c.env.ASSETS.fetch(new Request(new URL("/project.html", c.req.url))));
 app.get("/project.html", (c) => c.env.ASSETS.fetch(c.req.raw));
 app.get("/dashboard.html", (c) => c.env.ASSETS.fetch(c.req.raw));
 app.get("/sessions.html", (c) => c.env.ASSETS.fetch(c.req.raw));
 app.get("/profile.html", (c) => c.env.ASSETS.fetch(c.req.raw));
+app.get("/team.html", (c) => c.env.ASSETS.fetch(c.req.raw));
+app.get("/home.html", (c) => c.env.ASSETS.fetch(c.req.raw));
+app.get("/loader.js", (c) => c.env.ASSETS.fetch(c.req.raw));
 app.get("/health", (c) => c.json({ ok: true, environment: (c.env as any).ENVIRONMENT || "unknown" }));
 app.get("/favicon.ico", () => new Response(null, { status: 204 }));
 
@@ -1103,10 +1107,139 @@ app.get("/api/projects/:slug/summary", async (c) => {
   });
 });
 
+// ── 일일 보드 (매니저: 팀, 관리자: 전체) ──────────────────────────────────
+// 각 멤버가 그날 "해야 할 일"(미완료 Jira 티켓) + "한 일"(분석된 세션) 반환
+async function dailyForMembers(env: Env, members: { email: string; name: string | null; team: string | null; plan?: string | null }[], dayStart: string, dayEnd: string) {
+  const out: any[] = [];
+  for (const m of members) {
+    // 미완료 티켓 (jira_tickets — 사용자가 jira 연동 시 캐시됨)
+    const tickets = await env.DB.prepare(`
+      SELECT key, summary, status, url FROM jira_tickets
+      WHERE user_email = ? AND (status IS NULL OR LOWER(status) NOT IN ('done','closed','완료','resolved'))
+      ORDER BY fetched_at DESC LIMIT 20
+    `).bind(m.email).all<any>();
+    // 그날 한 일 — 분석된 세션 (해당 사용자의 세션이며 그 날짜에 활동)
+    const done = await env.DB.prepare(`
+      SELECT a.session_id, a.ticket_key, a.summary, a.category,
+             t.summary AS ticket_summary, t.url AS ticket_url,
+             MIN(e.ts) started, MAX(e.ts) last_event,
+             SUM(e.input_tokens) input_tokens, SUM(e.output_tokens) output_tokens,
+             SUM(e.cache_read_tokens) cache_read_tokens, SUM(e.cache_create_tokens) cache_create_tokens,
+             MAX(e.model) model
+      FROM events e
+      JOIN session_analysis a ON a.session_id = e.session_id
+      LEFT JOIN jira_tickets t ON t.key = a.ticket_key AND t.user_email = ?
+      WHERE e.user_email = ? AND e.ts >= ? AND e.ts < ?
+      GROUP BY a.session_id ORDER BY last_event DESC
+    `).bind(m.email, m.email, dayStart, dayEnd).all<any>();
+    // 그날의 raw 활동 통계 (분석 안 된 세션도 포함)
+    const stats: any = await env.DB.prepare(`
+      SELECT COUNT(DISTINCT session_id) sessions, COUNT(*) events,
+             SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens,
+             SUM(cache_read_tokens) cache_read_tokens, SUM(cache_create_tokens) cache_create_tokens,
+             MAX(model) model
+      FROM events WHERE user_email = ? AND ts >= ? AND ts < ?
+    `).bind(m.email, dayStart, dayEnd).first();
+    out.push({
+      email: m.email, name: m.name, team: m.team, plan: m.plan || null,
+      todo: (tickets.results || []),
+      done: (done.results || []).map((d: any) => ({ ...d, cost_usd: costUsd(d) })),
+      stats: { ...stats, cost_usd: costUsd(stats || {}) },
+    });
+  }
+  return out;
+}
+
+function dayBounds(dateStr: string): { start: string; end: string; label: string } {
+  // dateStr YYYY-MM-DD assumed in KST. Convert to UTC ISO bounds.
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr || "");
+  const now = new Date();
+  let y: number, mo: number, d: number;
+  if (m) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+  else {
+    // KST today
+    const kst = new Date(now.getTime() + 9 * 3600_000);
+    y = kst.getUTCFullYear(); mo = kst.getUTCMonth() + 1; d = kst.getUTCDate();
+  }
+  // KST start = 00:00 KST = previous day 15:00 UTC
+  const start = new Date(Date.UTC(y, mo - 1, d, 0, 0, 0) - 9 * 3600_000);
+  const end = new Date(start.getTime() + 86400_000);
+  const label = `${y}-${String(mo).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+  return { start: start.toISOString(), end: end.toISOString(), label };
+}
+
+app.get("/api/teams/:team/daily", async (c) => {
+  const actor = c.get("actor");
+  const team = c.req.param("team");
+  if (!isAdmin(actor) && !(actor.role === "manager" && actor.team === team)) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  const b = dayBounds(c.req.query("date") || "");
+  // 팀 멤버 = tokens에 등록된 활성 사용자
+  const mem = await c.env.DB.prepare(
+    "SELECT user_email email, MAX(user_name) name, MAX(team) team, MAX(plan) plan FROM tokens WHERE team = ? AND revoked_at IS NULL GROUP BY user_email"
+  ).bind(team).all<any>();
+  const members = (mem.results || []) as any[];
+  const rows = await dailyForMembers(c.env, members, b.start, b.end);
+  return c.json({ date: b.label, team, members: rows });
+});
+
+app.get("/api/admin/daily", async (c) => {
+  const actor = c.get("actor");
+  if (!isAdmin(actor)) return c.json({ error: "forbidden" }, 403);
+  const b = dayBounds(c.req.query("date") || "");
+  const mem = await c.env.DB.prepare(
+    "SELECT user_email email, MAX(user_name) name, MAX(team) team, MAX(plan) plan FROM tokens WHERE revoked_at IS NULL GROUP BY user_email"
+  ).all<any>();
+  const members = (mem.results || []) as any[];
+  const rows = await dailyForMembers(c.env, members, b.start, b.end);
+  // 팀별 그룹
+  const byTeam: Record<string, any[]> = {};
+  for (const r of rows) {
+    const k = r.team || "(unassigned)";
+    (byTeam[k] = byTeam[k] || []).push(r);
+  }
+  return c.json({ date: b.label, teams: Object.entries(byTeam).map(([team, members]) => ({ team, members })) });
+});
+
 // "Whoami" — useful debugging for client setup
 app.get("/api/me", async (c) => {
   const a = c.get("actor");
-  return c.json({ email: a.email, name: a.name, team: a.team, role: a.role, via: a.via, is_admin: a.role === "admin" });
+  let plan: string | null = null;
+  try {
+    const r: any = await c.env.DB.prepare(
+      "SELECT plan FROM tokens WHERE user_email = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1"
+    ).bind(a.email).first();
+    plan = r?.plan || null;
+  } catch {}
+  return c.json({ email: a.email, name: a.name, team: a.team, role: a.role, via: a.via, is_admin: a.role === "admin", plan });
+});
+
+// 사용자가 등록한 플랜 조회/저장 (본인 또는 admin)
+const PLAN_IDS = new Set(["pro", "max-5x", "max-20x", "team", "api"]);
+app.get("/api/users/:email/registered-plan", async (c) => {
+  const actor = c.get("actor");
+  const email = c.req.param("email");
+  const target: any = await c.env.DB.prepare(
+    "SELECT MAX(team) team FROM events WHERE user_email = ?"
+  ).bind(email).first();
+  if (!canSeeUser(actor, email, target?.team)) return c.json({ error: "forbidden" }, 403);
+  const row: any = await c.env.DB.prepare(
+    "SELECT plan, plan_updated_at FROM tokens WHERE user_email = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1"
+  ).bind(email).first();
+  return c.json({ email, plan: row?.plan || null, plan_updated_at: row?.plan_updated_at || null });
+});
+app.put("/api/users/:email/registered-plan", async (c) => {
+  const actor = c.get("actor");
+  const email = c.req.param("email");
+  if (email !== actor.email && !isAdmin(actor)) return c.json({ error: "forbidden" }, 403);
+  const body = await c.req.json<any>().catch(() => ({}));
+  const plan = body.plan === null || body.plan === "" ? null : String(body.plan);
+  if (plan !== null && !PLAN_IDS.has(plan)) return c.json({ error: "invalid plan id" }, 400);
+  await c.env.DB.prepare(
+    "UPDATE tokens SET plan = ?, plan_updated_at = ? WHERE user_email = ? AND revoked_at IS NULL"
+  ).bind(plan, new Date().toISOString(), email).run();
+  return c.json({ ok: true, email, plan });
 });
 
 // ── Self-signup (no admin needed) ─────────────────────────────────────────
