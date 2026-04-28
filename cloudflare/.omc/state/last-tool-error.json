@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"ACCOUNT=8f74e284c3029c75ec4a412c04c09cfa\\nTOKEN=$(grep oauth_token /Users/song/Library/Preferences/.wrangler/config/default.toml | sed 's/.*\\\"\\\\(.*\\\\)\\\"/\\\\1/')\\n\\necho \\\"=== AI Gateway 생성 ...",
+  "error": "Exit code 1\n=== AI Gateway 생성 ===\n{\n    \"success\": false,\n    \"errors\": [\n        {\n            \"code\": 10000,\n            \"message\": \"Authentication error\"\n        }\n    ],\n    \"messages\": [],\n    \"result\": null\n}\n\n=== 생성된 게이트웨이 ===\nTraceback (most recent call last):\n  File \"<string>\", line 4, in <module>\nTypeError: 'NoneType' object is not iterable",
+  "timestamp": "2026-04-28T05:12:39.078Z",
+  "retry_count": 1
+}

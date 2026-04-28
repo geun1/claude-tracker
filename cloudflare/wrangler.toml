@@ -9,6 +9,9 @@ RETENTION_DAYS = "365"
 LEGACY_BEARER_ADMIN = "true"
 # LLM 분석에 사용할 모델 (Gemini)
 GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
+# Cloudflare AI Gateway 경유 (region 차단 우회 + 캐싱/로깅)
+# 대시보드 → AI → AI Gateway → 'claude-tracker' 이름으로 생성하면 이 URL이 활성화됨
+AI_GATEWAY_BASE = "https://gateway.ai.cloudflare.com/v1/8f74e284c3029c75ec4a412c04c09cfa/claude-tracker"
 # PRICING is inline in src/pricing.ts; override per-env if your contract differs.
 
 # ── D1 (SQLite at the edge) ─────────────────────────────────────────────────

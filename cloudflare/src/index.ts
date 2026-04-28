@@ -32,6 +32,7 @@ type Env = {
   ANTHROPIC_API_KEY?: string;      // (legacy) Claude 분석용
   GEMINI_API_KEY?: string;         // for /api/sessions/:id/analyze
   GEMINI_MODEL?: string;           // default in wrangler.toml
+  AI_GATEWAY_BASE?: string;        // CF AI Gateway URL (region 우회)
 };
 
 const app = new Hono<{ Bindings: Env; Variables: { actor: Actor } }>();
@@ -800,10 +801,15 @@ ${assistantSnippet.slice(0, 1500)}
   "key_changes": ["변경 1", "변경 2", "변경 3"]
 }`;
 
-  // Gemini API 호출
+  // Gemini API 호출 — Cloudflare AI Gateway 경유 (region 차단 우회).
+  // AI_GATEWAY_BASE가 설정되어 있고 대시보드에서 게이트웨이가 만들어졌다면 그 경로,
+  // 아니면 Google 직접 (대부분 worker location에서 차단됨).
   const model = c.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview";
+  const geminiBase = c.env.AI_GATEWAY_BASE
+    ? `${c.env.AI_GATEWAY_BASE.replace(/\/$/, "")}/google-ai-studio`
+    : "https://generativelanguage.googleapis.com";
   const geminiResp = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${c.env.GEMINI_API_KEY}`,
+    `${geminiBase}/v1beta/models/${model}:generateContent?key=${c.env.GEMINI_API_KEY}`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
