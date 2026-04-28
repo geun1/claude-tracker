@@ -122,6 +122,22 @@ app.post("/events", async (c) => {
     off.inline, off.key
   ).run();
 
+  // Claude Code의 /rename — hook이 transcript에서 customTitle 추출해 보내면 자동 동기화
+  if (b.custom_title && b.session_id) {
+    try {
+      await c.env.DB.prepare(
+        `INSERT INTO sessions_meta (session_id, name, updated_by, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at`
+      ).bind(
+        b.session_id,
+        String(b.custom_title).slice(0, 200),
+        b.user?.email ? `${b.user.email} via /rename` : "claude-code:/rename",
+        b.ts || new Date().toISOString()
+      ).run();
+    } catch {}
+  }
+
   return c.json({ ok: true });
 });
 

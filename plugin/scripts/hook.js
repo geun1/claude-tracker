@@ -42,6 +42,21 @@ function readStdin() {
   });
 }
 
+// Claude Code의 /rename은 transcript에 {type:"custom-title"} 라인을 남김.
+function extractCustomTitle(transcriptPath) {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
+  try {
+    const lines = fs.readFileSync(transcriptPath, "utf8").trim().split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const o = JSON.parse(lines[i]);
+        if (o.type === "custom-title" && o.customTitle) return String(o.customTitle);
+      } catch {}
+    }
+  } catch {}
+  return null;
+}
+
 function readTranscriptTail(transcriptPath) {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
   try {
@@ -133,6 +148,7 @@ function appendLocal(logDir, body) {
     model: transcriptInfo?.model || input.model || null,
     usage: transcriptInfo?.usage || null,
     transcript_lines: transcriptInfo?.lineCount || null,
+    custom_title: extractCustomTitle(input.transcript_path),
     hook_payload: input,
     config_snapshot: cfg.include_config === false ? null : {
       permission_mode: input.permission_mode || null,

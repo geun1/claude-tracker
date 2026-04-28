@@ -104,6 +104,20 @@ function flattenContent(content) {
     const projDir = path.basename(path.dirname(f));
     const cwd = projDir.startsWith("-") ? projDir.replace(/-/g, "/") : projDir;
     let raw; try { raw = fs.readFileSync(f, "utf8"); } catch { continue; }
+    // /rename으로 설정된 customTitle 추출 (마지막 등장)
+    let customTitle = null;
+    for (const ln of raw.split("\n").reverse()) {
+      if (!ln) continue;
+      try { const o = JSON.parse(ln); if (o.type === "custom-title" && o.customTitle) { customTitle = String(o.customTitle); break; } } catch {}
+    }
+    if (customTitle) {
+      events.push({
+        event: "rename", ts: new Date().toISOString(),
+        session_id: sessionId, user: userBlock, cwd,
+        custom_title: customTitle,
+        hook_payload: { source: "backfill-rename" },
+      });
+    }
     let seq = 0;
     for (const line of raw.split("\n")) {
       if (!line) continue;
