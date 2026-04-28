@@ -1,17 +1,11 @@
 {
   "name": "aptner-internal",
-  "owner": {
-    "name": "Aptner AX",
-    "email": "gsong@aptner.com"
-  },
+  "owner": { "name": "Aptner AX", "email": "gsong@aptner.com" },
   "plugins": [
     {
       "name": "claude-tracker",
-      "source": ".",
-      "description": "전사 Claude Code 사용량/세션/토큰/비용 중앙 추적 (Cloudflare Workers + D1 + R2)",
-      "version": "0.3.0",
-      "category": "telemetry",
-      "homepage": "https://github.com/geun1/claude-tracker"
+      "description": "전사 Claude Code 사용량 추적 (Cloudflare Workers + D1 + R2)",
+      "version": "0.3.0"
     }
   ]
 }
