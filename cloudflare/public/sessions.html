@@ -166,6 +166,34 @@
   .toolcall .label { font-size:10.5px; color:var(--mute); text-transform:uppercase; letter-spacing:.08em; margin-bottom:6px; }
   .codeblk { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:12px; background:var(--code-bg); border-radius:8px; padding:12px 14px; overflow-x:auto; margin:0; color:#cdd9e5; line-height:1.6; white-space:pre; border:1px solid var(--line); }
 
+  /* Turn 구조 — 사용자 질문 + (에이전트 작업) + 최종 답변 */
+  .turn { margin-bottom:36px; padding-bottom:8px; border-bottom:1px dashed #1a2229; }
+  .turn:last-child { border-bottom:none; }
+
+  /* 에이전트 작업 드롭다운 */
+  details.turn-work { margin:14px 0; border:1px solid var(--line); border-radius:12px; background:linear-gradient(180deg, var(--panel-2), var(--panel)); overflow:hidden; }
+  details.turn-work summary { cursor:pointer; padding:14px 18px; list-style:none; user-select:none; display:flex; align-items:center; gap:14px; }
+  details.turn-work summary::-webkit-details-marker { display:none; }
+  details.turn-work summary:hover { background:#1a2029; }
+  details.turn-work .tw-icon { font-size:18px; }
+  details.turn-work .tw-title { flex:1; min-width:0; }
+  details.turn-work .tw-main { font-weight:600; font-size:13.5px; color:var(--fg); }
+  details.turn-work .tw-sub { font-size:11.5px; color:var(--mute); margin-top:3px; }
+  details.turn-work .tw-sub code { background:var(--panel); border:1px solid var(--line); padding:1px 7px; border-radius:8px; font-size:10.5px; color:var(--tool); margin-right:2px; }
+  details.turn-work .tw-chev { color:var(--mute); font-size:14px; transition:transform .15s; }
+  details.turn-work[open] .tw-chev { transform:rotate(180deg); }
+  details.turn-work .tw-body { padding:14px 20px 18px; border-top:1px solid var(--line); background:rgba(0,0,0,.2); }
+  details.turn-work .tw-body .msg { padding:0 8px; margin-bottom:18px; opacity:0.92; }
+  details.turn-work .tw-body .msg:last-child { margin-bottom:0; }
+
+  /* 최종 답변 강조 */
+  .msg.final { padding:0 24px; }
+  .msg.final .meta { margin-bottom:10px; }
+  .msg.final .meta .role { color:var(--asst); font-weight:700; font-size:13px; }
+  .msg.final .final-badge { background:linear-gradient(135deg, #10b98144, #059669aa); color:#86efac; font-size:10px; font-weight:600; padding:3px 9px; border-radius:8px; letter-spacing:.04em; text-transform:uppercase; border:1px solid #10b98166; }
+  .msg.final .bubble { border-left:3px solid var(--asst); padding-left:14px; }
+  .msg.final .text { font-size:14.5px; }
+
   /* Bash 터미널 카드 */
   .toolcall.bash { background:#0a0e14; border-color:#1a2229; }
   .toolcall.bash summary { background:#0d1218; border-bottom:1px solid #1a2229; }
@@ -525,20 +553,25 @@ async function loadDetail() {
       <span class="chip ${messageFilter==='bash'?'active':''}" data-filter="bash"><span class="ic">›_</span>명령어 ${counts.bash}</span>
     </div>`;
 
+  // 턴으로 그룹: 사용자 질문 → 에이전트 중간작업 → 최종 답변
+  const turns = groupIntoTurns(visibleMessages);
+
   // Group by day with separators
   let bodyHtml = '<div class="conv-body" id="convBody">';
   let lastDay = null;
   const todayStr = fmtDay(new Date().toISOString());
   const yestDate = new Date(); yestDate.setDate(yestDate.getDate() - 1);
   const yestStr = fmtDay(yestDate.toISOString());
-  for (const m of visibleMessages) {
-    const day = fmtDay(m.ts);
+  for (const turn of turns) {
+    const anchor = turn.user || turn.final || turn.work[0];
+    if (!anchor) continue;
+    const day = fmtDay(anchor.ts);
     if (day !== lastDay) {
       const rel = day === todayStr ? "오늘" : day === yestStr ? "어제" : "";
-      bodyHtml += `<div class="day-sep"><div class="line"></div><span class="label">${escapeHtml(fmtDate(m.ts))}${rel ? ` <span class="rel">· ${rel}</span>` : ""}</span><div class="line"></div></div>`;
+      bodyHtml += `<div class="day-sep"><div class="line"></div><span class="label">${escapeHtml(fmtDate(anchor.ts))}${rel ? ` <span class="rel">· ${rel}</span>` : ""}</span><div class="line"></div></div>`;
       lastDay = day;
     }
-    bodyHtml += renderMsg(m);
+    bodyHtml += renderTurn(turn);
   }
   bodyHtml += '</div>';
 
@@ -586,6 +619,95 @@ async function loadDetail() {
   });
 }
 
+// 메시지를 턴 단위로 그룹: 사용자질문 → 중간작업 → 최종답변
+function groupIntoTurns(messages) {
+  // "진짜" 사용자 질문: role=user + 본문 있음 + tool_result 아님
+  const isRealUser = (m) => m.role === "user" && m.text && m.text.trim() && !m.tool_result;
+  const turns = [];
+  let cur = null;
+  for (const m of messages) {
+    if (isRealUser(m)) {
+      if (cur) turns.push(cur);
+      cur = { user: m, work: [], final: null };
+    } else {
+      if (!cur) cur = { user: null, work: [], final: null };
+      cur.work.push(m);
+    }
+  }
+  if (cur) turns.push(cur);
+
+  // 각 턴에서 "최종 답변" 추출 (마지막 assistant + text + tool_calls 없음)
+  for (const turn of turns) {
+    for (let i = turn.work.length - 1; i >= 0; i--) {
+      const m = turn.work[i];
+      const noTools = !m.tool_calls || m.tool_calls.length === 0;
+      const hasText = m.text && m.text.trim();
+      if (m.role === "assistant" && hasText && noTools) {
+        turn.final = m;
+        turn.work.splice(i, 1);
+        break;
+      }
+    }
+    // 그래도 final이 없으면, text가 있는 마지막 assistant라도 사용
+    if (!turn.final) {
+      for (let i = turn.work.length - 1; i >= 0; i--) {
+        const m = turn.work[i];
+        if (m.role === "assistant" && m.text && m.text.trim()) {
+          turn.final = m;
+          turn.work.splice(i, 1);
+          break;
+        }
+      }
+    }
+  }
+  return turns;
+}
+
+function renderTurn(turn) {
+  let html = '<div class="turn">';
+
+  // 1) 사용자 질문 (있으면)
+  if (turn.user) html += renderMsg(turn.user);
+
+  // 2) 에이전트 중간 작업 (드롭다운)
+  if (turn.work.length > 0) {
+    const toolCount = turn.work.reduce((s, m) => s + (m.tool_calls?.length || 0), 0);
+    const thinkCount = turn.work.filter(m => m.thinking && m.thinking.trim()).length;
+    const resultCount = turn.work.filter(m => m.tool_result).length;
+    const stepCount = turn.work.length;
+    const summaryParts = [];
+    if (toolCount) summaryParts.push(`🔧 도구 ${toolCount}회`);
+    if (thinkCount) summaryParts.push(`💭 사고 ${thinkCount}회`);
+    if (resultCount) summaryParts.push(`📤 결과 ${resultCount}건`);
+    const tools = [...new Set(turn.work.flatMap(m => (m.tool_calls || []).map(t => t.name)))].slice(0, 6);
+    const firstTime = turn.work[0]?.ts;
+    const lastTime = turn.work[turn.work.length-1]?.ts;
+    const dur = firstTime && lastTime ? Math.round((new Date(lastTime) - new Date(firstTime)) / 1000) : 0;
+
+    html += `
+      <details class="turn-work">
+        <summary>
+          <div class="tw-icon">🛠</div>
+          <div class="tw-title">
+            <div class="tw-main">에이전트 작업 ${stepCount}단계${dur>0?` · ⏱ ${fmtDur(dur)}`:""}</div>
+            <div class="tw-sub">${summaryParts.join(" · ")}${tools.length ? ` · ${tools.map(t => `<code>${escapeHtml(t)}</code>`).join(" ")}` : ""}</div>
+          </div>
+          <div class="tw-chev">▾</div>
+        </summary>
+        <div class="tw-body">
+          ${turn.work.map(m => renderMsg(m)).join("")}
+        </div>
+      </details>`;
+  }
+
+  // 3) 최종 Claude 답변
+  if (turn.final) html += renderMsg(turn.final, { isFinal: true });
+  // (final도 없고 work도 없으면 빈 턴 — 거의 안 일어남)
+
+  html += '</div>';
+  return html;
+}
+
 function shouldCollapse(text) { return text && text.length > 320; }
 
 function renderTextMaybeCollapsed(text, isUser=false) {
@@ -595,8 +717,8 @@ function renderTextMaybeCollapsed(text, isUser=false) {
   return `<div class="text collapsible collapsed">${html}</div><button class="more-btn">▾ 더 보기...</button>`;
 }
 
-function renderMsg(m) {
-  const role = m.role === "assistant" ? "Claude" : m.role === "user" ? "사용자" : m.role;
+function renderMsg(m, opts = {}) {
+  const role = m.role === "assistant" ? (opts.isFinal ? "Claude" : "Claude") : m.role === "user" ? "사용자" : m.role;
   const time = fmtTime(m.ts);
   const respTime = m._respMs ? ` · ⏱ ${fmtDur(Math.round(m._respMs/1000))}` : "";
   const modelChip = m.role === "assistant" && m.model ? `<span class="model">${escapeHtml(m.model)} <span class="help">ⓘ</span></span>` : "";
@@ -683,9 +805,11 @@ function renderMsg(m) {
   if (!inner) return "";
 
   const isUser = m.role === "user";
+  const cls = `msg ${m.role}${opts.isFinal ? " final" : ""}`;
   return `
-    <div class="msg ${m.role}" id="msg-${m.seq}">
+    <div class="${cls}" id="msg-${m.seq}">
       <div class="meta">
+        ${opts.isFinal ? '<span class="final-badge">최종 답변</span>' : ""}
         <span class="role">${role}</span>
         <span class="dot">·</span>
         <span>${time}${respTime}</span>
