@@ -102,6 +102,7 @@
   </select>
   <a class="btn" href="/">← 대시보드</a>
   <a class="btn" id="sessionLink" href="#">세션 보기 →</a>
+  <button class="btn" id="jiraBtn" title="Jira 연결">🎫 Jira</button>
   <button class="btn" id="accountBtn" title="계정 설정">⚙</button>
 </header>
 
@@ -215,6 +216,13 @@ async function load() {
       </div>
 
       <div class="section">
+        <div class="card" id="todayWork">
+          <div class="title">오늘의 작업 <span class="badge" id="workCount">로딩…</span></div>
+          <div id="workList"><div class="empty" style="padding:14px;font-size:12px">아직 분석된 세션이 없습니다. 세션 뷰어에서 🤖 분석 버튼을 눌러 LLM이 티켓·요약을 채우게 하세요.</div></div>
+        </div>
+      </div>
+
+      <div class="section">
         <div class="card">
           <div class="title">일별 토큰 추이</div>
           <canvas id="trendChart"></canvas>
@@ -279,6 +287,43 @@ async function load() {
 
     // Render trend chart
     drawTrend(ts365.rows || []);
+
+    // Today's work (LLM-analyzed sessions)
+    api(`/api/users/${encodeURIComponent(email)}/work?days=${days}`).then(work => {
+      const wc = qs("#workCount"); const wl = qs("#workList");
+      if (!work || !work.length) {
+        wc.textContent = "0"; return;
+      }
+      // 티켓별 그룹
+      const groups = {};
+      for (const w of work) {
+        const k = w.ticket_key || "(미연결)";
+        groups[k] = groups[k] || { ticket_summary: w.ticket_summary, ticket_status: w.ticket_status, ticket_url: w.ticket_url, sessions: [] };
+        groups[k].sessions.push(w);
+      }
+      wc.textContent = Object.keys(groups).length + " 티켓";
+      wl.innerHTML = Object.entries(groups).map(([key, g]) => {
+        const totDur = g.sessions.reduce((s, x) => {
+          const d = (new Date(x.last_event) - new Date(x.started)) / 1000;
+          return s + (d > 0 && d < 86400 ? Math.min(d, 14400) : 0);
+        }, 0);
+        const totCost = g.sessions.reduce((s, x) => s + (x.cost_usd || 0), 0);
+        return `
+          <div style="padding:14px 0;border-top:1px solid var(--line)">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+              ${key !== "(미연결)" ? `<a href="${escapeHtml(g.ticket_url||'#')}" target="_blank" style="text-decoration:none;font-weight:700;color:var(--accent)">🎫 ${escapeHtml(key)}</a>` : `<span style="color:var(--mute);font-weight:600">📂 미연결</span>`}
+              ${g.ticket_status ? `<span class="pill">${escapeHtml(g.ticket_status)}</span>` : ""}
+            </div>
+            ${g.ticket_summary ? `<div style="color:var(--mute);font-size:12.5px;margin-bottom:8px">${escapeHtml(g.ticket_summary)}</div>` : ""}
+            <div style="font-size:11.5px;color:var(--mute);margin-bottom:8px">
+              ⏱ ${fmtDur(Math.round(totDur))} · 💬 ${g.sessions.length}세션 · 💰 ${fmtUSD(totCost)}
+            </div>
+            <ul style="margin:0;padding-left:18px;font-size:12.5px;line-height:1.6;color:var(--fg)">
+              ${g.sessions.map(s => `<li style="margin-bottom:3px"><a href="/browse?user=${encodeURIComponent(email)}&session=${s.session_id}" style="color:var(--fg);text-decoration:none">${escapeHtml(s.summary || "(요약 없음)")}</a></li>`).join("")}
+            </ul>
+          </div>`;
+      }).join("");
+    }).catch(() => {});
     // Tools — fetch from /stats (filtered by user)
     api(`/stats?days=${days}&user=${encodeURIComponent(email)}`).then(s => {
       const max = Math.max(...(s.byTool || []).map(x => x.n), 1);
@@ -324,6 +369,99 @@ function drawTrend(rows) {
       ctx.fillText(r.day.slice(5), i*bw + 2, h - 6);
     }
   });
+}
+
+// 통합 상태 로드 + 버튼 라벨 갱신
+async function refreshIntegrations() {
+  try {
+    const list = await api("/api/integrations");
+    const j = (list || []).find(x => x.kind === "jira");
+    const btn = qs("#jiraBtn");
+    if (j) { btn.textContent = "🎫 Jira ✓"; btn.style.background = "#10b98144"; btn.style.borderColor = "var(--asst)"; }
+    else   { btn.textContent = "🎫 Jira 연결"; }
+  } catch {}
+}
+refreshIntegrations();
+
+qs("#jiraBtn")?.addEventListener("click", () => openJiraModal());
+
+function openJiraModal() {
+  const modal = document.createElement("div");
+  modal.style.cssText = "position:fixed;inset:0;background:#000a;z-index:50;display:flex;align-items:center;justify-content:center";
+  modal.innerHTML = `
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px;max-width:540px;width:92%">
+      <h3 style="margin:0 0 4px;font-size:18px">🎫 Jira 연결</h3>
+      <p style="color:var(--mute);font-size:12px;margin:0 0 18px">세션을 Jira 티켓에 자동 매칭하고 작업 내용을 요약합니다.</p>
+
+      <ol style="font-size:12.5px;color:var(--mute);line-height:1.8;padding-left:18px;margin:0 0 14px">
+        <li>API 토큰 발급:
+          <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" style="color:var(--accent)">id.atlassian.com 열기 →</a>
+        </li>
+        <li>아래 정보 입력 후 [연결 테스트] → [저장]</li>
+      </ol>
+
+      <div style="display:grid;gap:10px;margin-bottom:14px">
+        <label style="font-size:11px;color:var(--mute)">서버 URL
+          <input id="jiraUrl" type="text" placeholder="https://aptner.atlassian.net" style="width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);padding:9px 12px;border-radius:8px;font-size:13px;margin-top:3px"/>
+        </label>
+        <label style="font-size:11px;color:var(--mute)">계정 이메일
+          <input id="jiraEmail" type="email" placeholder="you@aptner.com" style="width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);padding:9px 12px;border-radius:8px;font-size:13px;margin-top:3px"/>
+        </label>
+        <label style="font-size:11px;color:var(--mute)">API 토큰
+          <input id="jiraToken" type="password" placeholder="ATATT..." style="width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);padding:9px 12px;border-radius:8px;font-size:13px;font-family:ui-monospace,monospace;margin-top:3px"/>
+        </label>
+      </div>
+
+      <div id="jiraStatus" style="font-size:12px;margin-bottom:10px;min-height:18px"></div>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+        <button class="btn" id="jiraDisconnect" style="color:var(--bad);margin-right:auto;display:none">연결 해제</button>
+        <button class="btn" id="jiraTest">연결 테스트</button>
+        <button class="btn" id="jiraSave" style="background:var(--accent);color:#fff;border-color:var(--accent)">저장</button>
+        <button class="btn" id="jiraClose">닫기</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener("click", e => { if (e.target === modal) modal.remove(); });
+  qs("#jiraClose").onclick = () => modal.remove();
+
+  // 기존 등록 정보 채워넣기
+  api("/api/integrations").then(list => {
+    const j = (list || []).find(x => x.kind === "jira");
+    if (j) {
+      qs("#jiraUrl").value = j.base_url || "";
+      qs("#jiraEmail").value = j.account_email || "";
+      qs("#jiraToken").placeholder = "(저장된 토큰 그대로, 변경 시에만 입력)";
+      qs("#jiraDisconnect").style.display = "inline-block";
+    }
+  });
+
+  qs("#jiraTest").onclick = async () => {
+    const status = qs("#jiraStatus"); status.innerHTML = "테스트 중...";
+    const r = await fetch(withToken("/api/integrations/jira/test"), {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ base_url: qs("#jiraUrl").value, email: qs("#jiraEmail").value, token: qs("#jiraToken").value })
+    }).then(r => r.json()).catch(e => ({ ok:false, error:e.message }));
+    if (r.ok) status.innerHTML = `<span style="color:var(--good)">✓ 연결 OK · ${r.user?.displayName || "?"} · ${r.projectsCount || 0}개 프로젝트</span>`;
+    else status.innerHTML = `<span style="color:var(--bad)">✗ 실패: ${r.error || r.detail || "?"}</span>`;
+  };
+  qs("#jiraSave").onclick = async () => {
+    const status = qs("#jiraStatus"); status.innerHTML = "저장 중...";
+    const r = await fetch(withToken("/api/integrations/jira"), {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ base_url: qs("#jiraUrl").value, email: qs("#jiraEmail").value, token: qs("#jiraToken").value })
+    }).then(r => r.json()).catch(e => ({ error:e.message }));
+    if (r.ok) {
+      status.innerHTML = `<span style="color:var(--good)">✓ 저장됨 · ${r.displayName || ""} (${r.projectsCount || 0} projects)</span>`;
+      refreshIntegrations();
+      setTimeout(() => modal.remove(), 1200);
+    } else status.innerHTML = `<span style="color:var(--bad)">✗ ${r.error || r.detail || "?"}</span>`;
+  };
+  qs("#jiraDisconnect").onclick = async () => {
+    if (!confirm("Jira 연결을 해제하시겠습니까?")) return;
+    await fetch(withToken("/api/integrations/jira"), { method: "DELETE" });
+    refreshIntegrations(); modal.remove();
+  };
 }
 
 qs("#accountBtn")?.addEventListener("click", () => {

@@ -15,6 +15,8 @@
  */
 import { Hono } from "hono";
 import { getActor, isAdmin, isManagerOrAbove, canSeeUser, canIssueRole, scopeFor, generateToken, hashToken, type Actor } from "./auth";
+import { encryptToken, decryptToken } from "./crypto";
+import { pingJira, fetchTicket, fetchAssignedOpen } from "./jira";
 import { maskString, maskJsonValue } from "./masking";
 import { costUsd } from "./pricing";
 import { maybeOffload, loadIfOffloaded } from "./r2helpers";
@@ -26,6 +28,8 @@ type Env = {
   TRACKER_TOKEN?: string;
   ADMIN_EMAILS?: string;
   RETENTION_DAYS?: string;
+  INTEGRATION_KEY?: string;        // 32-byte hex, AES-GCM
+  ANTHROPIC_API_KEY?: string;      // for /api/sessions/:id/analyze
 };
 
 const app = new Hono<{ Bindings: Env; Variables: { actor: Actor } }>();
@@ -138,6 +142,37 @@ app.post("/events", async (c) => {
     } catch {}
   }
 
+  return c.json({ ok: true });
+});
+
+// hook이 Stop/SessionEnd에서 git 컨텍스트 push
+app.post("/api/session-git", async (c) => {
+  const actor = c.get("actor");
+  const b = await c.req.json<any>().catch(() => ({}));
+  if (!b.session_id) return c.json({ error: "session_id required" }, 400);
+  // 본인 세션만
+  const head: any = await c.env.DB.prepare(
+    "SELECT MAX(user_email) user_email FROM events WHERE session_id = ?"
+  ).bind(b.session_id).first();
+  if (head?.user_email && head.user_email !== actor.email && !isAdmin(actor)) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  await c.env.DB.prepare(`
+    INSERT INTO session_git (session_id, repo_root, remote_url, branch, commits_json, diff_stat, collected_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      repo_root=excluded.repo_root, remote_url=excluded.remote_url,
+      branch=excluded.branch, commits_json=excluded.commits_json,
+      diff_stat=excluded.diff_stat, collected_at=excluded.collected_at
+  `).bind(
+    b.session_id,
+    b.repo_root || null,
+    b.remote_url || null,
+    b.branch || null,
+    JSON.stringify(b.commits || []),
+    b.diff_stat || null,
+    new Date().toISOString()
+  ).run();
   return c.json({ ok: true });
 });
 
@@ -626,6 +661,257 @@ app.delete("/api/admin/tokens/:hashPrefix", async (c) => {
   ).bind(new Date().toISOString(), prefix + "%").run();
   await audit(c.env, actor, "token_revoke", null, null, c.req.header("cf-connecting-ip") || null);
   return c.json({ ok: true, revoked: r.meta?.changes || 0 });
+});
+
+// ── Integrations (Jira) ──────────────────────────────────────────────────
+async function getJiraConn(env: Env, email: string): Promise<{ base_url: string; email: string; token: string } | null> {
+  if (!env.INTEGRATION_KEY) return null;
+  const row: any = await env.DB.prepare(
+    "SELECT base_url, account_email, token_iv, token_ct FROM user_integrations WHERE user_email = ? AND kind = 'jira'"
+  ).bind(email).first();
+  if (!row) return null;
+  try {
+    const token = await decryptToken(env.INTEGRATION_KEY, row.token_iv, row.token_ct);
+    return { base_url: row.base_url, email: row.account_email, token };
+  } catch { return null; }
+}
+
+app.get("/api/integrations", async (c) => {
+  const actor = c.get("actor");
+  const rows = await c.env.DB.prepare(
+    "SELECT kind, base_url, account_email, meta_json, created_at, updated_at FROM user_integrations WHERE user_email = ?"
+  ).bind(actor.email).all();
+  return c.json(rows.results || []);
+});
+
+app.post("/api/integrations/jira/test", async (c) => {
+  const body = await c.req.json<any>().catch(() => ({}));
+  const { base_url, email, token } = body || {};
+  if (!base_url || !email || !token) return c.json({ ok: false, error: "base_url/email/token required" }, 400);
+  const r = await pingJira({ base_url, email, token });
+  return c.json(r);
+});
+
+app.post("/api/integrations/jira", async (c) => {
+  const actor = c.get("actor");
+  if (!c.env.INTEGRATION_KEY) return c.json({ error: "server missing INTEGRATION_KEY secret" }, 500);
+  const body = await c.req.json<any>().catch(() => ({}));
+  const { base_url, email, token } = body || {};
+  if (!base_url || !email || !token) return c.json({ error: "base_url/email/token required" }, 400);
+  const ping = await pingJira({ base_url, email, token });
+  if (!ping.ok) return c.json({ error: "jira auth failed", detail: ping.error || "?" }, 400);
+  const enc = await encryptToken(c.env.INTEGRATION_KEY, token);
+  const now = new Date().toISOString();
+  await c.env.DB.prepare(`
+    INSERT INTO user_integrations (user_email, kind, base_url, account_email, token_iv, token_ct, meta_json, created_at, updated_at)
+    VALUES (?, 'jira', ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_email, kind) DO UPDATE SET
+      base_url=excluded.base_url, account_email=excluded.account_email,
+      token_iv=excluded.token_iv, token_ct=excluded.token_ct,
+      meta_json=excluded.meta_json, updated_at=excluded.updated_at
+  `).bind(actor.email, base_url.replace(/\/$/, ""), email, enc.iv, enc.ct,
+    JSON.stringify({ projectsCount: ping.projectsCount, displayName: ping.user?.displayName }),
+    now, now).run();
+  await audit(c.env, actor, "jira_connect", actor.email, null, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: true, projectsCount: ping.projectsCount, displayName: ping.user?.displayName });
+});
+
+app.delete("/api/integrations/jira", async (c) => {
+  const actor = c.get("actor");
+  await c.env.DB.prepare("DELETE FROM user_integrations WHERE user_email = ? AND kind = 'jira'").bind(actor.email).run();
+  await audit(c.env, actor, "jira_disconnect", actor.email, null, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: true });
+});
+
+// ── Session analysis (LLM, on-demand) ────────────────────────────────────
+app.post("/api/sessions/:id/analyze", async (c) => {
+  const actor = c.get("actor");
+  const sid = c.req.param("id");
+  if (!c.env.ANTHROPIC_API_KEY) return c.json({ error: "ANTHROPIC_API_KEY secret not set" }, 500);
+
+  // 권한 체크
+  const head: any = await c.env.DB.prepare(
+    "SELECT MAX(user_email) user_email, MAX(team) team, MAX(cwd) cwd, MAX(model) model FROM events WHERE session_id = ?"
+  ).bind(sid).first();
+  if (!head?.user_email) return c.json({ error: "session not found" }, 404);
+  if (!canSeeUser(actor, head.user_email, head.team)) return c.json({ error: "forbidden" }, 403);
+
+  // 메시지 수집 (앞쪽 사용자 프롬프트 위주)
+  const msgsRes = await c.env.DB.prepare(`
+    SELECT role, text, tool_calls_json
+    FROM messages WHERE session_id = ? ORDER BY seq ASC LIMIT 60
+  `).bind(sid).all<any>();
+  const userPrompts: string[] = [];
+  const toolNames = new Set<string>();
+  let assistantSnippet = "";
+  for (const m of msgsRes.results || []) {
+    if (m.role === "user" && m.text) {
+      const cleaned = m.text.replace(/<[^>]+>[\s\S]*?<\/[^>]+>/g, "").trim();
+      if (cleaned.length > 5 && userPrompts.length < 5) userPrompts.push(cleaned.slice(0, 500));
+    } else if (m.role === "assistant") {
+      if (m.text && assistantSnippet.length < 1500) assistantSnippet += m.text.slice(0, 500) + "\n";
+      try {
+        const tc = JSON.parse(m.tool_calls_json || "[]");
+        for (const t of tc) if (t.name) toolNames.add(t.name);
+      } catch {}
+    }
+  }
+
+  // git 컨텍스트
+  const git: any = await c.env.DB.prepare("SELECT * FROM session_git WHERE session_id = ?").bind(sid).first();
+
+  // 사용자의 jira 미완료 티켓 (있으면 컨텍스트로)
+  let openTickets: any[] = [];
+  const jira = await getJiraConn(c.env, head.user_email);
+  if (jira) openTickets = await fetchAssignedOpen(jira, 30);
+
+  const prompt = `Claude Code 세션을 분석합니다. 작업이 어떤 Jira 티켓에 해당하는지, 무엇을 했는지 한국어로 요약하세요.
+
+## 컨텍스트
+- 작업 디렉토리: ${head.cwd || "?"}
+- 모델: ${head.model || "?"}
+${git ? `- Git 브랜치: ${git.branch || "?"}
+- Remote: ${git.remote_url || "?"}
+- 최근 커밋: ${git.commits_json || "[]"}
+- 변경: ${git.diff_stat || "?"}` : ""}
+
+## 사용자가 담당하는 미완료 Jira 티켓
+${openTickets.length ? openTickets.map(t => `- ${t.key} [${t.status}] ${t.summary}`).join("\n") : "(연동 안 됨 or 없음)"}
+
+## 사용된 도구
+${[...toolNames].join(", ") || "(없음)"}
+
+## 사용자 프롬프트 (앞 5개)
+${userPrompts.map((p, i) => `${i+1}. ${p}`).join("\n\n")}
+
+## 어시스턴트 응답 발췌
+${assistantSnippet.slice(0, 1500)}
+
+## 출력 (반드시 valid JSON만)
+{
+  "ticket_key": "ASOS-1234 또는 null",
+  "ticket_confidence": 0.0~1.0,
+  "summary": "한 줄 한국어 요약",
+  "category": "feature|bugfix|refactor|docs|chore|exploration",
+  "key_changes": ["변경 1", "변경 2", "변경 3"]
+}`;
+
+  // Anthropic API 호출
+  const anthropicResp = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": c.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 600,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+  if (!anthropicResp.ok) {
+    const errText = await anthropicResp.text();
+    return c.json({ error: "LLM call failed", detail: errText.slice(0, 300) }, 500);
+  }
+  const llm = await anthropicResp.json<any>();
+  const usage = llm.usage || {};
+  const respText = (llm.content || []).map((c: any) => c.text || "").join("");
+  // JSON 파싱 (코드 펜스 제거)
+  let parsed: any = {};
+  try {
+    const jsonStr = (respText.match(/\{[\s\S]*\}/) || [respText])[0];
+    parsed = JSON.parse(jsonStr);
+  } catch { parsed = { summary: respText.slice(0, 200) }; }
+
+  // 비용 (haiku-4-5 단가)
+  const cost = ((usage.input_tokens || 0) * 1 + (usage.output_tokens || 0) * 5) / 1e6;
+
+  await c.env.DB.prepare(`
+    INSERT INTO session_analysis (session_id, ticket_key, ticket_confidence, summary, category, key_changes, model, cost_usd, analyzed_by, analyzed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      ticket_key=excluded.ticket_key, ticket_confidence=excluded.ticket_confidence,
+      summary=excluded.summary, category=excluded.category, key_changes=excluded.key_changes,
+      model=excluded.model, cost_usd=excluded.cost_usd,
+      analyzed_by=excluded.analyzed_by, analyzed_at=excluded.analyzed_at
+  `).bind(
+    sid,
+    parsed.ticket_key || null,
+    typeof parsed.ticket_confidence === "number" ? parsed.ticket_confidence : null,
+    parsed.summary || null,
+    parsed.category || null,
+    JSON.stringify(parsed.key_changes || []),
+    "claude-haiku-4-5-20251001",
+    cost,
+    actor.email,
+    new Date().toISOString()
+  ).run();
+
+  // ticket 메타도 캐시
+  if (parsed.ticket_key && jira) {
+    const t = await fetchTicket(jira, parsed.ticket_key);
+    if (t) {
+      await c.env.DB.prepare(`
+        INSERT INTO jira_tickets (key, user_email, summary, status, assignee_email, url, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(key, user_email) DO UPDATE SET
+          summary=excluded.summary, status=excluded.status, assignee_email=excluded.assignee_email,
+          url=excluded.url, fetched_at=excluded.fetched_at
+      `).bind(t.key, head.user_email, t.summary, t.status, t.assignee_email, t.url, new Date().toISOString()).run();
+    }
+  }
+
+  await audit(c.env, actor, "analyze_session", head.user_email, sid, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: true, ...parsed, cost_usd: cost });
+});
+
+app.get("/api/sessions/:id/analysis", async (c) => {
+  const actor = c.get("actor");
+  const sid = c.req.param("id");
+  const head: any = await c.env.DB.prepare(
+    "SELECT MAX(user_email) user_email, MAX(team) team FROM events WHERE session_id = ?"
+  ).bind(sid).first();
+  if (!head?.user_email) return c.json(null);
+  if (!canSeeUser(actor, head.user_email, head.team)) return c.json({ error: "forbidden" }, 403);
+  const a: any = await c.env.DB.prepare("SELECT * FROM session_analysis WHERE session_id = ?").bind(sid).first();
+  if (!a) return c.json(null);
+  let ticket: any = null;
+  if (a.ticket_key) {
+    ticket = await c.env.DB.prepare(
+      "SELECT * FROM jira_tickets WHERE key = ? AND user_email = ?"
+    ).bind(a.ticket_key, head.user_email).first();
+  }
+  return c.json({ ...a, key_changes: a.key_changes ? JSON.parse(a.key_changes) : [], ticket });
+});
+
+// "오늘의 작업" — 사용자가 최근 N일 내 분석된 세션을 티켓별로 그룹
+app.get("/api/users/:email/work", async (c) => {
+  const actor = c.get("actor");
+  const email = c.req.param("email");
+  const target: any = email === actor.email ? { team: actor.team } : await c.env.DB.prepare(
+    "SELECT MAX(team) team FROM events WHERE user_email = ?"
+  ).bind(email).first();
+  if (!canSeeUser(actor, email, target?.team)) return c.json({ error: "forbidden" }, 403);
+  const days = Math.max(1, parseInt(c.req.query("days") || "1", 10));
+  const since = new Date(Date.now() - days * 86400_000).toISOString();
+  const rows = await c.env.DB.prepare(`
+    SELECT a.session_id, a.ticket_key, a.summary, a.category, a.key_changes,
+           t.summary AS ticket_summary, t.status AS ticket_status, t.url AS ticket_url,
+           e.started, e.last_event, e.cost_usd, e.events
+    FROM session_analysis a
+    LEFT JOIN jira_tickets t ON t.key = a.ticket_key AND t.user_email = ?
+    LEFT JOIN (
+      SELECT session_id,
+             MIN(ts) started, MAX(ts) last_event, COUNT(*) events,
+             SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens
+      FROM events GROUP BY session_id
+    ) e ON e.session_id = a.session_id
+    WHERE a.analyzed_at >= ?
+    AND a.session_id IN (SELECT DISTINCT session_id FROM events WHERE user_email = ?)
+    ORDER BY e.last_event DESC
+  `).bind(email, since, email).all();
+  return c.json(rows.results || []);
 });
 
 // "Whoami" — useful debugging for client setup

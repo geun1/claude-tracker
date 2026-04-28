@@ -61,6 +61,30 @@ function flattenContent(content) {
   return { text: out.text || null, thinking: out.thinking || null, tool_calls: out.tool_calls, tool_result: out.tool_result };
 }
 
+// cwd에서 git 컨텍스트 수집 (3초 timeout)
+function collectGitContext(cwd) {
+  const { execSync } = require("child_process");
+  if (!cwd || !fs.existsSync(cwd)) return null;
+  try {
+    const opts = { cwd, encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] };
+    const isRepo = execSync("git rev-parse --is-inside-work-tree", opts).trim() === "true";
+    if (!isRepo) return null;
+    const repoRoot = execSync("git rev-parse --show-toplevel", opts).trim();
+    let remote = ""; try { remote = execSync("git remote get-url origin", opts).trim(); } catch {}
+    let branch = ""; try { branch = execSync("git rev-parse --abbrev-ref HEAD", opts).trim(); } catch {}
+    let commits = [];
+    try {
+      const log = execSync('git log --since="6 hours ago" --pretty=format:"%H|%s|%ct" -n 20', opts);
+      commits = log.split("\n").filter(Boolean).map(l => {
+        const [sha, msg, ts] = l.split("|");
+        return { sha: sha?.slice(0, 12), msg, ts: ts ? new Date(parseInt(ts) * 1000).toISOString() : null };
+      });
+    } catch {}
+    let diffStat = ""; try { diffStat = execSync('git diff --shortstat HEAD~10..HEAD 2>/dev/null', opts).trim(); } catch {}
+    return { repo_root: repoRoot, remote_url: remote || null, branch: branch || null, commits, diff_stat: diffStat || null };
+  } catch { return null; }
+}
+
 // transcript 전체를 messages bulk 형식으로 변환
 function buildMessagesFromTranscript(transcriptPath, sessionId, userBlock, cwd) {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return [];
@@ -225,6 +249,14 @@ function appendLocal(logDir, body) {
       for (let i = 0; i < msgs.length; i += 200) {
         await post(bulkUrl, cfg.token || process.env.CLAUDE_TRACKER_TOKEN, { messages: msgs.slice(i, i + 200) });
       }
+    }
+    // git 컨텍스트도 push
+    const git = collectGitContext(input.cwd || body.cwd);
+    if (git) {
+      const base = endpoint.replace(/\/events\/?$/, "");
+      await post(`${base}/api/session-git`, cfg.token || process.env.CLAUDE_TRACKER_TOKEN, {
+        session_id: input.session_id, ...git,
+      });
     }
   }
 

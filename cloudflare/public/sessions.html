@@ -280,6 +280,7 @@
   <button class="icon-btn" id="togIndex" title="메시지 (3)">📑</button>
   <a class="icon-btn" href="/">📊</a>
   <button class="icon-btn" id="copyMd" title="이 세션을 마크다운으로 복사" disabled>📋 MD</button>
+  <button class="icon-btn" id="analyzeBtn" title="LLM으로 이 세션 분석 (Jira 티켓 매칭 + 요약)" disabled>🤖 분석</button>
   <button class="icon-btn" id="accountBtn" title="계정 설정">⚙</button>
 </header>
 
@@ -637,6 +638,11 @@ async function loadDetail() {
   // 마크다운 복사 활성화
   qs("#copyMd").disabled = false;
   qs("#copyMd").onclick = () => copySessionAsMarkdown(s, visibleMessages);
+
+  // LLM 분석 버튼 + 기존 분석 결과 표시
+  qs("#analyzeBtn").disabled = false;
+  qs("#analyzeBtn").onclick = () => runAnalysis(selectedSession);
+  loadExistingAnalysis(selectedSession);
 
   // 세션 이름 변경
   const titleEl = qs("#sessionTitle");
@@ -1027,6 +1033,58 @@ function pushUrl() {
   if (selectedUser) p.set("user", selectedUser);
   if (selectedSession) p.set("session", selectedSession);
   history.replaceState(null, "", "/browse?" + p.toString());
+}
+
+async function loadExistingAnalysis(sid) {
+  if (!sid) return;
+  try {
+    const a = await api(`/api/sessions/${sid}/analysis`);
+    if (a) renderAnalysisBanner(a);
+  } catch {}
+}
+
+async function runAnalysis(sid) {
+  const btn = qs("#analyzeBtn");
+  btn.textContent = "🤖 분석 중...";
+  btn.disabled = true;
+  try {
+    const r = await fetch(withToken(`/api/sessions/${sid}/analyze`), { method: "POST" });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || j.detail || "실패");
+    btn.textContent = "🤖 재분석";
+    btn.disabled = false;
+    // 결과 페치(티켓 메타 포함) 후 표시
+    const a = await api(`/api/sessions/${sid}/analysis`);
+    if (a) renderAnalysisBanner(a);
+  } catch (e) {
+    btn.textContent = "🤖 분석";
+    btn.disabled = false;
+    alert("분석 실패: " + e.message + "\n\nANTHROPIC_API_KEY가 wrangler secret으로 등록되어야 합니다.");
+  }
+}
+
+function renderAnalysisBanner(a) {
+  // 기존 배너 제거
+  const old = qs("#analysisBanner"); if (old) old.remove();
+  const conv = qs("#convScroll");
+  if (!conv) return;
+  const ticket = a.ticket;
+  const banner = document.createElement("div");
+  banner.id = "analysisBanner";
+  banner.style.cssText = "background:linear-gradient(135deg, var(--accent-soft), var(--panel-2));border:1px solid var(--accent);border-radius:12px;padding:16px 20px;margin:14px 24px;color:var(--fg)";
+  banner.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <span style="font-size:11px;color:var(--mute);text-transform:uppercase;letter-spacing:.06em">🤖 LLM 분석</span>
+      ${a.category ? `<span class="pill">${escapeHtml(a.category)}</span>` : ""}
+      ${ticket ? `<a href="${escapeHtml(ticket.url||'#')}" target="_blank" style="text-decoration:none"><span class="pill" style="background:var(--accent);color:#fff">🎫 ${escapeHtml(ticket.key)} · ${escapeHtml(ticket.status||'')}</span></a>` :
+        a.ticket_key ? `<span class="pill" style="background:var(--accent);color:#fff">🎫 ${escapeHtml(a.ticket_key)}</span>` : ""}
+      ${typeof a.ticket_confidence === "number" ? `<span style="font-size:10.5px;color:var(--mute)">신뢰도 ${(a.ticket_confidence*100).toFixed(0)}%</span>` : ""}
+    </div>
+    ${ticket?.summary ? `<div style="font-size:13px;color:var(--mute);margin-bottom:6px">${escapeHtml(ticket.summary)}</div>` : ""}
+    <div style="font-size:14.5px;font-weight:600;margin-bottom:6px">${escapeHtml(a.summary || "")}</div>
+    ${(a.key_changes||[]).length ? `<ul style="margin:6px 0 0;padding-left:20px;color:var(--mute);font-size:12.5px;line-height:1.7">${(a.key_changes||[]).map(k => `<li>${escapeHtml(k)}</li>`).join("")}</ul>` : ""}
+  `;
+  conv.insertBefore(banner, conv.firstChild?.nextSibling || null);
 }
 
 function copySessionAsMarkdown(head, msgs) {
