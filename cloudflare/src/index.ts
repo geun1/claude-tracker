@@ -913,20 +913,23 @@ app.get("/api/users/:email/work", async (c) => {
   const rows = await c.env.DB.prepare(`
     SELECT a.session_id, a.ticket_key, a.summary, a.category, a.key_changes,
            t.summary AS ticket_summary, t.status AS ticket_status, t.url AS ticket_url,
-           e.started, e.last_event, e.cost_usd, e.events
+           e.started, e.last_event, e.events,
+           e.input_tokens, e.output_tokens, e.cache_read_tokens, e.cache_create_tokens, e.model
     FROM session_analysis a
     LEFT JOIN jira_tickets t ON t.key = a.ticket_key AND t.user_email = ?
     LEFT JOIN (
-      SELECT session_id,
+      SELECT session_id, MAX(model) model,
              MIN(ts) started, MAX(ts) last_event, COUNT(*) events,
-             SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens
+             SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens,
+             SUM(cache_read_tokens) cache_read_tokens, SUM(cache_create_tokens) cache_create_tokens
       FROM events GROUP BY session_id
     ) e ON e.session_id = a.session_id
     WHERE a.analyzed_at >= ?
     AND a.session_id IN (SELECT DISTINCT session_id FROM events WHERE user_email = ?)
     ORDER BY e.last_event DESC
-  `).bind(email, since, email).all();
-  return c.json(rows.results || []);
+  `).bind(email, since, email).all<any>();
+  const out = (rows.results || []).map((r: any) => ({ ...r, cost_usd: costUsd(r) }));
+  return c.json(out);
 });
 
 // ── Bulk analyze (한 사용자의 미분석 세션 일괄) ──────────────────────────
