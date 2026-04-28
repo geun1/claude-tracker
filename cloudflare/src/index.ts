@@ -695,6 +695,11 @@ EOF
 chmod 600 "\$HOME/.claude/tracker.json"
 green "✅ ~/.claude/tracker.json 생성"
 
+# 0) git이 SSH(github.com)를 HTTPS로 치환하도록 글로벌 설정 (Claude Code의 /plugin install이 SSH로 가도 통과)
+if command -v git >/dev/null; then
+  git config --global url."https://github.com/".insteadOf "git@github.com:" 2>/dev/null || true
+fi
+
 # 2) 플러그인 clone
 PLUGIN_DIR="\$HOME/.claude/plugins/claude-tracker"
 if [ -d "\$PLUGIN_DIR/.git" ]; then
@@ -724,7 +729,7 @@ if [ "\$B" = "Y" ] || [ "\$B" = "y" ]; then
   if [ -d "\$HOME/.claude/projects" ] && command -v node >/dev/null; then
     bold "⏳ 백필 시작. 진행상황은 아래에 표시됩니다 (Ctrl+C로 중단 가능)..."
     CLAUDE_TRACKER_USER="\$EMAIL" CLAUDE_TRACKER_NAME="\$NAME" CLAUDE_TRACKER_TEAM="\$TEAM" \\
-      node "\$PLUGIN_DIR/scripts/backfill.js" "\$ENDPOINT" "\$TOKEN" || red "⚠ 백필 중단됨 (나중에 다시 실행 가능)"
+      node "\$PLUGIN_DIR/plugin/scripts/backfill.js" "\$ENDPOINT" "\$TOKEN" || red "⚠ 백필 중단됨 (나중에 다시 실행 가능)"
   else
     red "⚠ ~/.claude/projects 또는 node가 없어 백필 건너뜀"
   fi

@@ -1,2 +1,5 @@
 {"t":0,"agent":"acf7788","agent_type":"unknown","event":"agent_stop","success":true}
 {"t":0,"agent":"a6877b8","agent_type":"unknown","event":"agent_stop","success":true}
+{"t":0,"agent":"a9fc4ca","agent_type":"unknown","event":"agent_stop","success":true}
+{"t":0,"agent":"a492304","agent_type":"claude-code-guide","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a492304","agent_type":"claude-code-guide","event":"agent_stop","success":true,"duration_ms":46231}

@@ -4,9 +4,11 @@
   "plugins": [
     {
       "name": "claude-tracker",
-      "source": "https://github.com/geun1/claude-tracker",
+      "source": "./plugin",
       "description": "전사 Claude Code 사용량 추적 (Cloudflare Workers + D1 + R2)",
-      "version": "0.3.0"
+      "version": "0.3.0",
+      "category": "telemetry",
+      "homepage": "https://github.com/geun1/claude-tracker"
     }
   ]
 }
