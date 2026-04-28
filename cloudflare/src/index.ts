@@ -29,7 +29,9 @@ type Env = {
   ADMIN_EMAILS?: string;
   RETENTION_DAYS?: string;
   INTEGRATION_KEY?: string;        // 32-byte hex, AES-GCM
-  ANTHROPIC_API_KEY?: string;      // for /api/sessions/:id/analyze
+  ANTHROPIC_API_KEY?: string;      // (legacy) Claude 분석용
+  GEMINI_API_KEY?: string;         // for /api/sessions/:id/analyze
+  GEMINI_MODEL?: string;           // default in wrangler.toml
 };
 
 const app = new Hono<{ Bindings: Env; Variables: { actor: Actor } }>();
@@ -729,7 +731,7 @@ app.delete("/api/integrations/jira", async (c) => {
 app.post("/api/sessions/:id/analyze", async (c) => {
   const actor = c.get("actor");
   const sid = c.req.param("id");
-  if (!c.env.ANTHROPIC_API_KEY) return c.json({ error: "ANTHROPIC_API_KEY secret not set" }, 500);
+  if (!c.env.GEMINI_API_KEY) return c.json({ error: "GEMINI_API_KEY secret not set" }, 500);
 
   // 권한 체크
   const head: any = await c.env.DB.prepare(
@@ -798,36 +800,41 @@ ${assistantSnippet.slice(0, 1500)}
   "key_changes": ["변경 1", "변경 2", "변경 3"]
 }`;
 
-  // Anthropic API 호출
-  const anthropicResp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": c.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 600,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
-  if (!anthropicResp.ok) {
-    const errText = await anthropicResp.text();
-    return c.json({ error: "LLM call failed", detail: errText.slice(0, 300) }, 500);
+  // Gemini API 호출
+  const model = c.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview";
+  const geminiResp = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${c.env.GEMINI_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          maxOutputTokens: 800,
+          temperature: 0.2,
+        },
+      }),
+    }
+  );
+  if (!geminiResp.ok) {
+    const errText = await geminiResp.text();
+    return c.json({ error: "Gemini call failed", detail: errText.slice(0, 400) }, 500);
   }
-  const llm = await anthropicResp.json<any>();
-  const usage = llm.usage || {};
-  const respText = (llm.content || []).map((c: any) => c.text || "").join("");
-  // JSON 파싱 (코드 펜스 제거)
+  const llm = await geminiResp.json<any>();
+  const respText = llm?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || "").join("") || "";
+  const usage = {
+    input_tokens: llm?.usageMetadata?.promptTokenCount || 0,
+    output_tokens: llm?.usageMetadata?.candidatesTokenCount || 0,
+  };
   let parsed: any = {};
   try {
     const jsonStr = (respText.match(/\{[\s\S]*\}/) || [respText])[0];
     parsed = JSON.parse(jsonStr);
   } catch { parsed = { summary: respText.slice(0, 200) }; }
 
-  // 비용 (haiku-4-5 단가)
-  const cost = ((usage.input_tokens || 0) * 1 + (usage.output_tokens || 0) * 5) / 1e6;
+  // 비용 (Gemini Flash Lite: $0.10/1M input, $0.40/1M output)
+  const cost = ((usage.input_tokens || 0) * 0.10 + (usage.output_tokens || 0) * 0.40) / 1e6;
 
   await c.env.DB.prepare(`
     INSERT INTO session_analysis (session_id, ticket_key, ticket_confidence, summary, category, key_changes, model, cost_usd, analyzed_by, analyzed_at)
@@ -844,7 +851,7 @@ ${assistantSnippet.slice(0, 1500)}
     parsed.summary || null,
     parsed.category || null,
     JSON.stringify(parsed.key_changes || []),
-    "claude-haiku-4-5-20251001",
+    model,
     cost,
     actor.email,
     new Date().toISOString()

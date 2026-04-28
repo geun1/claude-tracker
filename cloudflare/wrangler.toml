@@ -6,9 +6,9 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 ENVIRONMENT = "production"
 RETENTION_DAYS = "365"
-# Treat the legacy shared TRACKER_TOKEN as admin (true) or just an unprivileged
-# token (false). Flip to false once everyone is on Access SSO or a per-user token.
 LEGACY_BEARER_ADMIN = "true"
+# LLM 분석에 사용할 모델 (Gemini)
+GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 # PRICING is inline in src/pricing.ts; override per-env if your contract differs.
 
 # ── D1 (SQLite at the edge) ─────────────────────────────────────────────────
