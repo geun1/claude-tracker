@@ -660,12 +660,37 @@ function copyTurnPair(turn, btn) {
     out.push(turn.final.text || "");
   }
   const text = out.join("\n");
-  navigator.clipboard.writeText(text).then(() => {
-    const orig = btn.textContent;
-    btn.textContent = "✓ 복사됨";
-    btn.classList.add("done");
+  copyToClipboard(text).then(ok => {
+    const orig = "📋 복사";
+    if (ok) {
+      btn.textContent = "✓ 복사됨";
+      btn.classList.add("done");
+    } else {
+      btn.textContent = "✗ 실패";
+    }
     setTimeout(() => { btn.textContent = orig; btn.classList.remove("done"); }, 1500);
-  }).catch(() => { btn.textContent = "✗ 실패"; });
+  });
+}
+
+async function copyToClipboard(text) {
+  // 1차: navigator.clipboard (HTTPS + 권한)
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {}
+  // 2차: 숨겨진 textarea + execCommand (legacy, 헤드리스도 가능)
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0";
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch { return false; }
 }
 
 // Claude Code transcript에는 사용자가 안 친 시스템성 메시지가 user role로 들어옴.
