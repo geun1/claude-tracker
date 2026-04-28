@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Claude Tracker · 프로젝트</title>
+<style>
+  :root { color-scheme: dark; --bg:#0a0d12; --panel:#11151b; --panel-2:#161b22; --line:#1c222b; --fg:#e6edf3; --mute:#7d8590; --dim:#5e6673; --accent:#3b82f6; --accent-soft:#1e3a8a44; --good:#22c55e; --warn:#f59e0b; --bad:#ef4444; }
+  * { box-sizing: border-box }
+  html, body { margin:0; padding:0; }
+  body { font:13.5px/1.55 -apple-system,"Pretendard",Inter,system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb { background:#262d38; border-radius:5px; border:2px solid var(--bg); }
+
+  header { display:flex; align-items:center; gap:14px; padding:16px 28px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { margin:0; font-size:14px; font-weight:600; }
+  header .crumb { color:var(--mute); font-weight:400; }
+  header a.btn, header button.btn { background:var(--panel-2); border:1px solid var(--line); color:var(--fg); padding:6px 12px; border-radius:8px; font-size:12.5px; text-decoration:none; cursor:pointer; }
+  header .grow { flex:1 }
+  header select { background:var(--panel-2); color:var(--fg); border:1px solid var(--line); padding:6px 12px; border-radius:8px; font-size:12.5px; }
+
+  main { padding:28px; max-width:1400px; margin:0 auto; }
+  .section { margin-bottom:28px; }
+  .section h2 { font-size:14px; font-weight:600; margin:0 0 14px; }
+
+  .kpis { display:grid; grid-template-columns:repeat(4, 1fr); gap:16px; margin-bottom:24px; }
+  .kpi { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; }
+  .kpi .label { font-size:11px; color:var(--mute); text-transform:uppercase; }
+  .kpi .num { font-size:26px; font-weight:700; margin-top:6px; font-variant-numeric:tabular-nums; }
+
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; margin-bottom:16px; }
+  .card .title { font-size:13px; font-weight:500; margin-bottom:14px; display:flex; justify-content:space-between; align-items:center; }
+  .card .badge { background:var(--panel-2); color:var(--mute); padding:2px 9px; border-radius:10px; font-size:10.5px; }
+
+  /* Ticket card */
+  .ticket-card { padding:16px 18px; background:var(--panel-2); border:1px solid var(--line); border-radius:12px; margin-bottom:12px; }
+  .ticket-card.stuck { border-color:var(--bad); background:#ef444411; }
+  .ticket-card.done { opacity:0.7; border-color:var(--good); background:#22c55e11; }
+  .ticket-head { display:flex; align-items:center; gap:10px; margin-bottom:6px; flex-wrap:wrap; }
+  .ticket-head .key { font-weight:700; color:var(--accent); text-decoration:none; font-size:14px; }
+  .pill { display:inline-block; padding:2px 9px; border-radius:10px; font-size:10.5px; background:var(--panel); color:var(--mute); }
+  .pill.todo { background:#7d859033; color:var(--mute); }
+  .pill.inprog { background:#3b82f633; color:#bfdbfe; }
+  .pill.done { background:#22c55e33; color:#86efac; }
+  .pill.blocked { background:#ef444433; color:#fca5a5; }
+  .pill.stuck { background:#ef444433; color:#fca5a5; }
+  .pill.feature { background:#3b82f633; color:#bfdbfe; }
+  .pill.bugfix { background:#ef444433; color:#fca5a5; }
+  .pill.refactor { background:#a855f733; color:#d8b4fe; }
+  .pill.exploration { background:#7d859033; color:var(--mute); }
+  .ticket-body { color:var(--mute); font-size:12.5px; margin-bottom:10px; }
+  .ticket-meta { display:flex; gap:16px; color:var(--mute); font-size:11.5px; flex-wrap:wrap; }
+  .ticket-meta b { color:var(--fg); }
+  .session-list { margin-top:10px; padding-left:18px; font-size:12.5px; line-height:1.7; }
+  .session-list a { color:var(--fg); text-decoration:none; }
+  .session-list a:hover { color:var(--accent); }
+
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  thead th { text-align:left; color:var(--mute); font-weight:500; font-size:10.5px; text-transform:uppercase; padding:8px 10px; border-bottom:1px solid var(--line); }
+  thead th.num { text-align:right; }
+  tbody td { padding:10px; border-bottom:1px solid var(--line); font-size:12.5px; }
+  tbody td.num { text-align:right; }
+  tbody tr:hover td { background:#161b22; }
+
+  .empty { color:var(--mute); padding:40px; text-align:center; font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🟧 Claude Tracker <span class="crumb"> / 프로젝트 / <span id="crumbName">…</span></span></h1>
+  <div class="grow"></div>
+  <select id="days">
+    <option value="7">7일</option>
+    <option value="14">14일</option>
+    <option value="30" selected>30일</option>
+    <option value="90">90일</option>
+  </select>
+  <a class="btn" href="/">← 대시보드</a>
+</header>
+
+<main id="main"><div class="empty">불러오는 중...</div></main>
+
+<script>
+const qs = (s) => document.querySelector(s);
+const fmt = (n) => Number(n||0).toLocaleString();
+const fmtUSD = (n) => "$" + Number(n||0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtDur = (s) => { if (!s||s<0) return "—"; if (s<60) return s+"s"; if (s<3600) return Math.floor(s/60)+"m"; return Math.floor(s/3600)+"h "+Math.floor((s%3600)/60)+"m"; };
+const escapeHtml = (s) => (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const tokenKey = "claude-tracker-token";
+const _urlTok = new URLSearchParams(location.search).get("token");
+if (_urlTok) localStorage.setItem(tokenKey, _urlTok);
+
+const slug = decodeURIComponent(location.pathname.replace(/^\/p\//, ""));
+qs("#crumbName").textContent = slug;
+qs("#days").addEventListener("change", load);
+
+function withToken(p) { const t = localStorage.getItem(tokenKey); return t ? p + (p.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(t) : p; }
+async function api(p) { const r = await fetch(withToken(p)); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }
+
+function statusClass(status) {
+  if (!status) return "";
+  const s = status.toLowerCase();
+  if (s.includes("done") || s.includes("complete") || s.includes("closed")) return "done";
+  if (s.includes("progress") || s.includes("review")) return "inprog";
+  if (s.includes("block")) return "blocked";
+  return "todo";
+}
+
+async function load() {
+  const days = qs("#days").value;
+  try {
+    const data = await api(`/api/projects/${encodeURIComponent(slug)}/summary?days=${days}`);
+    const stuckSet = new Set(data.stuck || []);
+
+    qs("#main").innerHTML = `
+      <div class="kpis">
+        <div class="kpi"><div class="label">기여 사용자</div><div class="num">${fmt(data.users.length)}</div></div>
+        <div class="kpi"><div class="label">티켓 수</div><div class="num">${fmt(data.tickets.length)}</div></div>
+        <div class="kpi"><div class="label">세션</div><div class="num">${fmt(data.sessionCount)}</div></div>
+        <div class="kpi"><div class="label">총 비용</div><div class="num" style="color:#fb923c">${fmtUSD(data.totalCost)}</div></div>
+      </div>
+
+      ${stuckSet.size ? `<div class="card" style="border-color:var(--bad);background:#ef444408">
+        <div class="title"><span style="color:var(--bad)">⚠ 막힌 티켓 ${stuckSet.size}건</span><span class="badge">commit 0 + 30분+ 사용</span></div>
+        <div style="font-size:12.5px;color:var(--mute);line-height:1.8">${[...stuckSet].map(k => `🎫 <b style="color:var(--fg)">${escapeHtml(k)}</b>`).join(" · ")}</div>
+      </div>` : ""}
+
+      <div class="section">
+        <h2>티켓별 진행 상황</h2>
+        ${data.tickets.length ? data.tickets
+          .sort((a, b) => (b.cost_usd||0) - (a.cost_usd||0))
+          .map(t => renderTicket(t, stuckSet)).join("") :
+          '<div class="empty">아직 분석된 세션이 없습니다.<br/>세션 뷰어에서 🤖 분석 버튼을 눌러 LLM이 티켓 매칭을 채우게 하세요.</div>'}
+      </div>
+
+      <div class="section">
+        <div class="card">
+          <div class="title">기여 사용자 <span class="badge">${data.users.length}</span></div>
+          ${data.users.map(u => `<a href="/u/${encodeURIComponent(u)}" style="color:var(--accent);text-decoration:none;margin-right:14px">👤 ${escapeHtml(u)}</a>`).join("")}
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    qs("#main").innerHTML = `<div class="empty" style="color:var(--bad)">에러: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderTicket(t, stuckSet) {
+  const isStuck = t.ticket_key && stuckSet.has(t.ticket_key);
+  const isDone = t.ticket_status && /done|complete|closed/i.test(t.ticket_status);
+  const totDur = t.sessions.reduce((s, x) => {
+    const d = (new Date(x.last_event) - new Date(x.started)) / 1000;
+    return s + (d > 0 && d < 86400 ? Math.min(d, 14400) : 0);
+  }, 0);
+  const cls = isStuck ? "stuck" : isDone ? "done" : "";
+  return `
+    <div class="ticket-card ${cls}">
+      <div class="ticket-head">
+        ${t.ticket_key ?
+          `<a class="key" href="${escapeHtml(t.ticket_url||'#')}" target="_blank">🎫 ${escapeHtml(t.ticket_key)}</a>` :
+          `<span style="color:var(--mute);font-weight:600">📂 (티켓 미연결)</span>`}
+        ${t.ticket_status ? `<span class="pill ${statusClass(t.ticket_status)}">${escapeHtml(t.ticket_status)}</span>` : ""}
+        ${isStuck ? `<span class="pill stuck">⚠ 막힘</span>` : ""}
+      </div>
+      ${t.ticket_summary ? `<div class="ticket-body">${escapeHtml(t.ticket_summary)}</div>` : ""}
+      <div class="ticket-meta">
+        <span>👤 <b>${t.users.length}</b>명: ${t.users.map(u => escapeHtml(u)).join(", ")}</span>
+        <span>⏱ <b>${fmtDur(Math.round(totDur))}</b></span>
+        <span>💬 <b>${t.sessions.length}</b> 세션</span>
+        <span>💰 <b>${fmtUSD(t.cost_usd)}</b></span>
+      </div>
+      <ul class="session-list">
+        ${t.sessions.slice(0, 8).map(s => `<li><a href="/browse?user=${encodeURIComponent(s.user_email)}&session=${s.session_id}">${escapeHtml(s.analysis_summary || s.branch || "(요약 없음)")}</a> <span style="color:var(--dim);font-size:11px">· ${escapeHtml(s.user_email)}${s.category?` · <span class="pill ${s.category}">${s.category}</span>`:""}</span></li>`).join("")}
+        ${t.sessions.length > 8 ? `<li style="color:var(--mute)">+ ${t.sessions.length - 8}개 더</li>` : ""}
+      </ul>
+    </div>
+  `;
+}
+
+load();
+</script>
+</body>
+</html>

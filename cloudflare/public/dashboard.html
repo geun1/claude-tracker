@@ -209,6 +209,17 @@
     </div>
   </div>
 
+  <!-- Projects -->
+  <div class="section">
+    <div class="card">
+      <div class="title">프로젝트별 사용량 <span class="badge" id="projCount">0</span></div>
+      <table id="projTable">
+        <thead><tr><th>프로젝트</th><th class="num">사용자</th><th class="num">세션</th><th class="num">토큰</th><th class="num">비용</th><th>마지막</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- Recent sessions -->
   <div class="section">
     <div class="card">
@@ -346,6 +357,7 @@ async function load() {
     renderSessionMetrics(sessions, stats);
     renderHourly(sessions);
     renderSessionsTable(sessions);
+    renderProjects();
   } catch (e) {
     qs("#kpis").innerHTML = `<div class="err">⚠ ${e.message}</div>`;
   }
@@ -582,6 +594,23 @@ function renderSessionsTable(sessions) {
 }
 
 function escapeHtml(s) { return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+async function renderProjects() {
+  try {
+    const projs = await api("/api/projects");
+    qs("#projCount").textContent = projs.length;
+    qs("#projTable tbody").innerHTML = projs.length ? projs.slice(0, 30).map(p => `
+      <tr onclick="${p.slug ? `location.href='/p/${escapeHtml(p.slug)}'` : ''}" ${p.slug?'style="cursor:pointer"':''}>
+        <td>${p.slug ? `<a class="link" href="/p/${escapeHtml(p.slug)}">📦 ${escapeHtml(p.slug)}</a>` : `<span style="color:var(--mute)">${escapeHtml(p.remote_url || '?')}</span>`}</td>
+        <td class="num">${p.users.length}</td>
+        <td class="num">${fmt(p.sessions)}</td>
+        <td class="num">${fmt((p.input_tokens||0)+(p.output_tokens||0))}</td>
+        <td class="num">${fmtUSD(p.cost_usd)}</td>
+        <td>${fmtTime(p.last_event)}</td>
+      </tr>
+    `).join("") : `<tr><td colspan="6" class="empty">아직 git 컨텍스트가 수집된 세션이 없습니다.<br/>새 세션이 Stop 시 자동으로 채워집니다.</td></tr>`;
+  } catch {}
+}
 
 // Account modal (token management)
 qs("#accountBtn").addEventListener("click", openAccount);
