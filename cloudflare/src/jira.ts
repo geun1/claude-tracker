@@ -16,6 +16,7 @@ export async function pingJira(c: JiraConn): Promise<{ ok: boolean; user?: any; 
     if (!me.ok) return { ok: false, error: `auth failed (${me.status})` };
     const user = await me.json<any>();
     const proj = await fetch(`${url}/rest/api/3/project/search?maxResults=1`, { headers: authHeader(c) });
+    // (project/search는 deprecated 아님 — issue search만 마이그레이션)
     let projectsCount = 0;
     if (proj.ok) { const p = await proj.json<any>(); projectsCount = p.total || 0; }
     return { ok: true, user, projectsCount };
@@ -51,12 +52,15 @@ export async function fetchAssignedOpen(c: JiraConn, max = 50): Promise<any[]> {
     // 3. 마지막 폴백: 최근 14일 내 모든 미완료 티켓 (좁은 워크스페이스용)
     'updated >= -14d AND statusCategory != Done ORDER BY updated DESC',
   ];
+  // Atlassian이 2024-2025 사이에 /rest/api/3/search를 deprecate(410) 시키고
+  // /rest/api/3/search/jql (POST) 로 이전. POST + body로 호출.
   for (const jql of queries) {
     try {
-      const r = await fetch(
-        `${url}/rest/api/3/search?jql=${encodeURIComponent(jql)}&maxResults=${max}&fields=summary,status,assignee`,
-        { headers: authHeader(c) }
-      );
+      const r = await fetch(`${url}/rest/api/3/search/jql`, {
+        method: "POST",
+        headers: { ...authHeader(c), "Content-Type": "application/json" },
+        body: JSON.stringify({ jql, maxResults: max, fields: ["summary", "status", "assignee"] }),
+      });
       if (!r.ok) continue;
       const j = await r.json<any>();
       const issues = (j.issues || []).map((i: any) => ({

@@ -1,7 +1,7 @@
 {
-  "tool_name": "Read",
-  "tool_input_preview": "{\"file_path\":\"/Users/song/.claude/projects/-Users-song-Desktop-duse_harness/f9ef4f93-f1fc-4f5d-a7c2-006f2f16f227/tool-results/toolu_01Jy9AWjiiMpb4dBpB8yTYye.txt\"}",
-  "error": "File does not exist. Note: your current working directory is /Users/song/Desktop/duse_harness/claude-tracker.",
-  "timestamp": "2026-04-28T01:33:05.775Z",
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd /Users/song/Desktop/duse_harness/claude-tracker/cloudflare\\nnpx wrangler deploy 2>&1 | tail -2\\nURL=https://claude-tracker.gsong.workers.dev\\nTOKEN=$(cat ~/.claude/tracker.json | python...",
+  "error": "Exit code 1\n  https://claude-tracker.gsong.workers.dev\nCurrent Version ID: f044f23d-ac2b-4100-8c43-59b6e9d4436e\n\n=== Jira 진단 ===\nExtra data: line 1 column 5 (char 4)",
+  "timestamp": "2026-04-28T06:18:04.274Z",
   "retry_count": 1
 }

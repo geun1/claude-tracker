@@ -731,6 +731,44 @@ app.get("/api/integrations/jira/tickets", async (c) => {
   return c.json({ ok: true, base_url: conn.base_url, count: tickets.length, tickets });
 });
 
+// Debug: Jira 토큰의 raw API 권한 진단
+app.get("/api/integrations/jira/diag", async (c) => {
+  const actor = c.get("actor");
+  const conn = await getJiraConn(c.env, actor.email);
+  if (!conn) return c.json({ error: "no jira connection saved" });
+  const auth = `Basic ${btoa(`${conn.email}:${conn.token}`)}`;
+  const headers = { Authorization: auth, Accept: "application/json" };
+  const url = conn.base_url.replace(/\/$/, "");
+  const out: any = { base_url: url };
+  // 1) myself
+  try { const r = await fetch(`${url}/rest/api/3/myself`, { headers }); out.myself = { status: r.status, body: r.ok ? await r.json() : await r.text() }; }
+  catch (e: any) { out.myself = { error: String(e?.message) }; }
+  // 2) project list
+  try { const r = await fetch(`${url}/rest/api/3/project/search?maxResults=20`, { headers });
+    const j = r.ok ? await r.json<any>() : null;
+    out.projects = { status: r.status, count: j?.total, sample: (j?.values || []).slice(0,5).map((p: any) => p.key) }; }
+  catch (e: any) { out.projects = { error: String(e?.message) }; }
+  // 3) JQL: assignee currentUser
+  for (const jql of [
+    "assignee = currentUser()",
+    "assignee = currentUser() AND statusCategory != Done",
+    "reporter = currentUser()",
+    "updated >= -30d",
+  ]) {
+    try {
+      const r = await fetch(`${url}/rest/api/3/search/jql`, {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ jql, maxResults: 3, fields: ["summary", "status", "assignee"] }),
+      });
+      const t = await r.text();
+      let body: any = null; try { body = JSON.parse(t); } catch { body = t.slice(0, 200); }
+      out[`jql_${jql.replace(/\W+/g, "_").slice(0, 30)}`] = { status: r.status, total: body?.total ?? null, sample: (body?.issues || []).slice(0,2).map((i: any) => ({ key: i.key, status: i.fields?.status?.name })) };
+    } catch (e: any) { out[`jql_err`] = String(e?.message); }
+  }
+  return c.json(out);
+});
+
 app.delete("/api/integrations/jira", async (c) => {
   const actor = c.get("actor");
   await c.env.DB.prepare("DELETE FROM user_integrations WHERE user_email = ? AND kind = 'jira'").bind(actor.email).run();
