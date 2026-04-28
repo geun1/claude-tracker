@@ -1168,6 +1168,31 @@ function dayBounds(dateStr: string): { start: string; end: string; label: string
   return { start: start.toISOString(), end: end.toISOString(), label };
 }
 
+// 팀 WBS / Gantt: 팀원들의 미완료 Jira 티켓을 라이브로 집계 (Jira 연동된 멤버만)
+app.get("/api/teams/:team/wbs", async (c) => {
+  const actor = c.get("actor");
+  const team = c.req.param("team");
+  if (!isAdmin(actor) && !(actor.role === "manager" && actor.team === team)) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  const mem = await c.env.DB.prepare(
+    "SELECT user_email email, MAX(user_name) name FROM tokens WHERE team = ? AND revoked_at IS NULL GROUP BY user_email"
+  ).bind(team).all<any>();
+  const members = (mem.results || []) as any[];
+  const tickets: any[] = [];
+  let withJira = 0, withoutJira = 0;
+  for (const m of members) {
+    const conn = await getJiraConn(c.env, m.email);
+    if (!conn) { withoutJira++; continue; }
+    withJira++;
+    try {
+      const ts = await fetchAssignedOpen(conn, 100);
+      for (const t of ts) tickets.push({ ...t, owner_email: m.email, owner_name: m.name });
+    } catch {}
+  }
+  return c.json({ team, members: members.length, with_jira: withJira, without_jira: withoutJira, tickets });
+});
+
 app.get("/api/teams/:team/daily", async (c) => {
   const actor = c.get("actor");
   const team = c.req.param("team");

@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8" />
-<title>팀 일일 보드 — claude-tracker</title>
+<title>duse-ai-plugin · 팀 일일 보드</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <style>
   :root{--bg:#0b0d10;--card:#11141a;--bd:#1f242c;--mut:#9aa3b2;--fg:#e7e9ee;--orange:#fb923c;--g:#86efac;--y:#fcd34d;--r:#fca5a5}
@@ -49,7 +49,11 @@
 </header>
 <main>
   <div class="kpis" id="kpis"></div>
-  <h2>멤버별 작업 현황</h2>
+
+  <h2>📊 팀 WBS &amp; Gantt <span style="font-weight:400;text-transform:none;color:#6b7280">(Jira 미완료 티켓 기준)</span></h2>
+  <div id="wbsBox" class="member" style="padding:14px;margin-bottom:14px"><div class="empty">불러오는 중…</div></div>
+
+  <h2>멤버별 작업 현황 — <span id="dateLabel"></span></h2>
   <div class="grid" id="members"></div>
 </main>
 <script>
@@ -99,6 +103,7 @@ async function loadMe(){
 
 async function load(){
   const date = document.getElementById("date").value || todayKST();
+  const dl = document.getElementById("dateLabel"); if (dl) dl.textContent = date;
   const cont = document.getElementById("members");
   cont.innerHTML = '<div class="empty">불러오는 중…</div>';
   try {
@@ -109,6 +114,100 @@ async function load(){
     cont.innerHTML = `<div class="err">⚠ ${escapeHtml(e.message)} — 권한이 없거나 잘못된 팀일 수 있습니다.</div>`;
     document.getElementById("kpis").innerHTML = "";
   }
+  loadWbs();
+}
+
+const PRIORITY_COLOR = { "Highest":"#fca5a5","High":"#fb923c","Medium":"#fcd34d","Low":"#86efac","Lowest":"#9aa3b2" };
+const STATUS_BUCKET = (s) => {
+  const x = (s||"").toLowerCase();
+  if (/(done|closed|완료|resolved)/.test(x)) return "done";
+  if (/(progress|review|진행)/.test(x)) return "doing";
+  return "todo";
+};
+
+async function loadWbs(){
+  const box = document.getElementById("wbsBox");
+  box.innerHTML = '<div class="empty">WBS 불러오는 중…</div>';
+  try {
+    const data = await api(`/api/teams/${encodeURIComponent(TEAM)}/wbs`);
+    if (!data.tickets || !data.tickets.length) {
+      box.innerHTML = `<div class="empty">집계 가능한 티켓이 없습니다. (Jira 연동: ${data.with_jira||0}/${data.members||0}명)</div>`;
+      return;
+    }
+    box.innerHTML = renderWbs(data);
+  } catch (e) {
+    box.innerHTML = `<div class="err">⚠ WBS 로딩 실패: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderWbs(data){
+  const tickets = data.tickets;
+  // 분류: status bucket × priority 정렬
+  const PRIO_ORDER = { "Highest":0, "High":1, "Medium":2, "Low":3, "Lowest":4 };
+  tickets.sort((a,b) => (PRIO_ORDER[a.priority]||9) - (PRIO_ORDER[b.priority]||9));
+  const byBucket = { doing: [], todo: [], done: [] };
+  for (const t of tickets) byBucket[STATUS_BUCKET(t.status)].push(t);
+
+  // Gantt 범위: 가장 이른 created ~ 가장 늦은 duedate (없으면 created+30d)
+  const dates = tickets.flatMap(t => [t.created, t.duedate].filter(Boolean).map(d => new Date(d).getTime())).filter(n => !isNaN(n));
+  const ganttMin = dates.length ? Math.min(...dates) : Date.now() - 14*86400000;
+  const ganttMax = dates.length ? Math.max(...dates, Date.now()) : Date.now() + 14*86400000;
+  const span = Math.max(1, ganttMax - ganttMin);
+
+  const ganttRows = tickets.filter(t => t.created || t.duedate).slice(0, 25).map(t => {
+    const start = t.created ? new Date(t.created).getTime() : ganttMin;
+    const end = t.duedate ? new Date(t.duedate).getTime() : Math.min(ganttMax, start + 7*86400000);
+    const left = ((start - ganttMin) / span * 100).toFixed(2);
+    const width = Math.max(2, ((end - start) / span * 100)).toFixed(2);
+    const color = PRIORITY_COLOR[t.priority] || "#60a5fa";
+    return `<div style="display:grid;grid-template-columns:200px 1fr;align-items:center;gap:10px;font-size:12px;padding:3px 0">
+      <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+        <a href="${t.url}" target="_blank" style="color:#fb923c;font-weight:600;text-decoration:none">${escapeHtml(t.key)}</a>
+        <span style="color:#9aa3b2;margin-left:6px">${escapeHtml((t.summary||"").slice(0,40))}</span>
+      </div>
+      <div style="position:relative;height:18px;background:#0d1015;border-radius:4px">
+        <div title="${escapeHtml(t.priority||'')} · ${escapeHtml(t.status||'')} · ${escapeHtml(t.owner_name||t.owner_email||'')}"
+             style="position:absolute;left:${left}%;width:${width}%;top:2px;bottom:2px;background:${color};border-radius:3px;opacity:.75"></div>
+      </div>
+    </div>`;
+  }).join("") || '<div class="empty" style="padding:8px">날짜(created/duedate) 데이터가 있는 티켓이 없습니다.</div>';
+
+  const ganttAxis = (() => {
+    const start = new Date(ganttMin), end = new Date(ganttMax);
+    return `<div style="display:grid;grid-template-columns:200px 1fr;font-size:10px;color:#6b7280;margin-top:4px">
+      <div></div>
+      <div style="display:flex;justify-content:space-between"><span>${start.toISOString().slice(0,10)}</span><span>${end.toISOString().slice(0,10)}</span></div>
+    </div>`;
+  })();
+
+  const wbsTable = (() => {
+    const rowsHtml = (rows, label, color) => `
+      <div style="margin-bottom:10px">
+        <div style="font-size:12px;color:${color};font-weight:600;margin-bottom:4px">${label} <span style="color:#6b7280;font-weight:400">· ${rows.length}건</span></div>
+        ${rows.length ? rows.map(t => `
+          <div class="item" style="display:grid;grid-template-columns:90px 1fr 80px 80px 100px 80px;gap:8px;align-items:center;font-size:12px">
+            <span><a href="${t.url}" target="_blank" style="color:#60a5fa;font-weight:600;text-decoration:none">${escapeHtml(t.key)}</a></span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(t.summary||"")}</span>
+            <span style="color:#9aa3b2">${escapeHtml(t.issuetype||"")}</span>
+            <span style="color:${PRIORITY_COLOR[t.priority]||"#9aa3b2"}">${escapeHtml(t.priority||"-")}</span>
+            <span style="color:#9aa3b2">${escapeHtml(t.owner_name||t.owner_email||"-")}</span>
+            <span style="color:#9aa3b2">${escapeHtml(t.duedate||"-")}</span>
+          </div>`).join("") : '<div class="empty" style="padding:4px 0">없음</div>'}
+      </div>`;
+    return rowsHtml(byBucket.doing, "🔵 진행 중", "#60a5fa") + rowsHtml(byBucket.todo, "⚪ 해야 할 일", "#fcd34d") + rowsHtml(byBucket.done, "✅ 완료", "#86efac");
+  })();
+
+  return `
+    <div style="font-size:12px;color:#9aa3b2;margin-bottom:10px">
+      집계: ${data.members}명 중 Jira 연동 ${data.with_jira}명 · 총 ${tickets.length}건
+    </div>
+    <div style="background:#0d1015;border:1px solid #1f242c;border-radius:6px;padding:10px;margin-bottom:14px">
+      <div style="font-size:12px;color:#fb923c;font-weight:600;margin-bottom:6px">📅 Gantt (Jira created → duedate 기반)</div>
+      ${ganttRows}
+      ${ganttAxis}
+    </div>
+    <div>${wbsTable}</div>
+  `;
 }
 
 function renderKPIs(data){

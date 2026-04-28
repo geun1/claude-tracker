@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Claude Tracker · Insights</title>
+<title>duse-ai-plugin · Insights</title>
 <style>
   :root {
     color-scheme: dark;
@@ -125,7 +125,7 @@
 </head>
 <body>
 <header>
-  <h1>🟧 Claude Tracker <span class="pill" id="liveDot">서버 확인중</span></h1>
+  <h1>🟧 duse-ai-plugin <span class="pill" id="liveDot">서버 확인중</span></h1>
   <span class="pill" id="meBox" style="display:none"></span>
   <div class="grow"></div>
   <select id="days">
@@ -136,6 +136,7 @@
     <option value="365">최근 365일</option>
   </select>
   <select id="teamFilter"><option value="">전체 팀</option></select>
+  <button class="btn" id="goTeamBtn" title="선택한 팀의 일일 보드/WBS로 이동" disabled>팀 페이지 →</button>
   <input id="token" placeholder="토큰" size="14" style="display:none" />
   <input id="dailyDate" type="date" />
   <button class="btn" onclick="loadDaily()">📅 일일 보드</button>
@@ -150,26 +151,14 @@
     <div class="kpis" id="kpis"></div>
   </div>
 
-  <!-- Activity heatmap (always 365d for context) -->
+  <!-- Admin/Manager hint -->
   <div class="section">
-    <h2>활동 히트맵 <span class="sub" id="heatmapTotalDays"></span></h2>
-    <div class="heatmap-card">
-      <div class="head">
-        <div class="title">매일 어떤 강도로 사용했는지 한눈에</div>
-        <div class="legend">
-          적음
-          <div class="cells">
-            <div class="cell" style="background:var(--hm-0)"></div>
-            <div class="cell" style="background:var(--hm-1)"></div>
-            <div class="cell" style="background:var(--hm-2)"></div>
-            <div class="cell" style="background:var(--hm-3)"></div>
-            <div class="cell" style="background:var(--hm-4)"></div>
-          </div>
-          많음
-        </div>
+    <div class="card" style="display:flex;align-items:center;gap:14px;padding:14px 18px;background:linear-gradient(135deg,#1e3a8a22,#11151b)">
+      <div style="font-size:13px;color:#93c5fd;flex:1">
+        💡 <b>활동 히트맵 · 도구 TOP · 시간대별 활동 · 세션 메트릭</b>은 사용자 개인 관점이라
+        <a class="link" href="#" id="goProfile" style="color:#fb923c">자기 프로필 페이지</a>에서 확인하세요.
+        대시보드는 팀 단위 비교에 집중합니다.
       </div>
-      <div class="heatmap-grid" id="heatmapGrid"></div>
-      <div class="heatmap-summary" id="heatmapSummary"></div>
     </div>
   </div>
 
@@ -188,27 +177,6 @@
         <thead><tr><th>사용자</th><th>팀</th><th class="num">세션</th><th class="num">토큰</th><th class="num">비용</th></tr></thead>
         <tbody></tbody>
       </table>
-    </div>
-  </div>
-
-  <!-- Tools / Session metrics -->
-  <div class="section grid-2">
-    <div class="card">
-      <div class="title">사용한 도구 TOP <span class="badge" id="toolTotal">0</span></div>
-      <div class="tools-list" id="toolsList"></div>
-    </div>
-    <div class="card">
-      <div class="title">세션 메트릭</div>
-      <div id="sessionMetrics"></div>
-    </div>
-  </div>
-
-  <!-- Hourly activity (시간대) -->
-  <div class="section">
-    <div class="card">
-      <div class="title">시간대별 활동 <span class="badge">KST</span></div>
-      <div class="hours" id="hoursBars"></div>
-      <div class="hour-axis" id="hoursAxis"></div>
     </div>
   </div>
 
@@ -265,7 +233,17 @@ if (_urlTok) { localStorage.setItem(tokenKey, _urlTok); history.replaceState(nul
 qs("#token").value = localStorage.getItem(tokenKey) || "";
 qs("#token").addEventListener("change", e => localStorage.setItem(tokenKey, e.target.value));
 qs("#days").addEventListener("change", load);
-qs("#teamFilter").addEventListener("change", load);
+qs("#teamFilter").addEventListener("change", () => {
+  qs("#goTeamBtn").disabled = !qs("#teamFilter").value;
+  load();
+});
+qs("#goTeamBtn").addEventListener("click", () => {
+  const t = qs("#teamFilter").value;
+  if (!t) return;
+  const tok = qs("#token").value.trim();
+  const tq = tok ? `?token=${encodeURIComponent(tok)}` : "";
+  location.href = `/t/${encodeURIComponent(t)}${tq}`;
+});
 
 function buildQuery(extra = {}) {
   const params = new URLSearchParams();
@@ -340,18 +318,20 @@ async function load() {
     qs("#liveDot").className = "pill " + (h?.ok ? "live" : "");
     qs("#liveDot").textContent = h?.ok ? "Live" : "Server offline";
 
-    // Show whoami in header
-    api("/api/me").then(me => {
+    // Show whoami in header + wire profile link
+    const me = await api("/api/me").catch(() => null);
+    if (me) {
       const roleColor = me.role === "admin" ? "#fca5a5" : me.role === "manager" ? "#fcd34d" : "#86efac";
       qs("#meBox").style.display = "inline-flex";
       qs("#meBox").innerHTML = `👤 ${escapeHtml(me.name || me.email)}${me.team?` · ${escapeHtml(me.team)}`:""} · <span style="color:${roleColor};margin-left:4px">${me.role}</span>`;
-    }).catch(() => {});
+      const goP = qs("#goProfile");
+      if (goP) goP.href = "/u/" + encodeURIComponent(me.email);
+    }
 
     const days = parseInt(qs("#days").value, 10);
-    const [stats, prevStats, ts365, users, teams, sessions] = await Promise.all([
+    const [stats, prevStats, users, teams, sessions] = await Promise.all([
       api("/stats"),
       fetch(withTokenRaw(`/stats?days=${days*2}&${teamQuery()}`)).then(r => r.ok ? r.json() : null).catch(() => null),
-      apiYear("/timeseries"),
       api("/users"),
       api("/teams"),
       api("/sessions?limit=300"),
@@ -359,12 +339,8 @@ async function load() {
 
     populateTeamFilter(teams);
     renderKPIs(stats, sessions, prevStats);
-    renderHeatmap(ts365.rows || []);
     renderTeams(teams);
     renderUsers(users);
-    renderTools(stats.byTool || []);
-    renderSessionMetrics(sessions, stats);
-    renderHourly(sessions);
     renderSessionsTable(sessions);
     renderProjects();
   } catch (e) {

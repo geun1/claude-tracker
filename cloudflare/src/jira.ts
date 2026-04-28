@@ -59,7 +59,7 @@ export async function fetchAssignedOpen(c: JiraConn, max = 50): Promise<any[]> {
       const r = await fetch(`${url}/rest/api/3/search/jql`, {
         method: "POST",
         headers: { ...authHeader(c), "Content-Type": "application/json" },
-        body: JSON.stringify({ jql, maxResults: max, fields: ["summary", "status", "assignee"] }),
+        body: JSON.stringify({ jql, maxResults: max, fields: ["summary", "status", "assignee", "priority", "duedate", "issuetype", "parent", "created", "updated"] }),
       });
       if (!r.ok) continue;
       const j = await r.json<any>();
@@ -68,6 +68,12 @@ export async function fetchAssignedOpen(c: JiraConn, max = 50): Promise<any[]> {
         summary: i.fields?.summary || "",
         status: i.fields?.status?.name || "",
         assignee: i.fields?.assignee?.displayName || null,
+        priority: i.fields?.priority?.name || null,
+        duedate: i.fields?.duedate || null,
+        issuetype: i.fields?.issuetype?.name || null,
+        parent_key: i.fields?.parent?.key || null,
+        created: i.fields?.created || null,
+        updated: i.fields?.updated || null,
         url: `${url}/browse/${i.key}`,
       }));
       if (issues.length) return issues;
