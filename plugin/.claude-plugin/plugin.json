@@ -1,9 +1,19 @@
 {
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "claude-tracker",
-  "version": "0.1.0",
-  "description": "Record Claude Code session history, usage, tokens, model, and config to a remote server.",
+  "version": "0.4.1",
+  "description": "Claude Code session tracker with Jira/Confluence integration and ticket-aware workflow.",
   "author": {
-    "name": "duse_harness"
+    "name": "Aptner AX",
+    "email": "gsong@aptner.com"
   },
-  "keywords": ["telemetry", "history", "usage", "tokens", "tracker"]
+  "homepage": "https://bitbucket.org/aptner/duse-ai-plugin",
+  "license": "Proprietary",
+  "keywords": [
+    "tracking",
+    "jira",
+    "confluence",
+    "context",
+    "ticket"
+  ]
 }
