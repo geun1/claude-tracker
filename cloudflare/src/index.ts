@@ -16,7 +16,8 @@
 import { Hono } from "hono";
 import { getActor, isAdmin, isManagerOrAbove, canSeeUser, canIssueRole, scopeFor, generateToken, hashToken, type Actor } from "./auth";
 import { encryptToken, decryptToken } from "./crypto";
-import { pingJira, fetchTicket, fetchAssignedOpen } from "./jira";
+import { pingJira, fetchTicket, fetchAssignedOpen, fetchTicketContext, addComment, getTransitions, doTransition } from "./jira";
+import { fetchConfluenceForTicket, createConfluencePage, addJiraRemoteLink, listConfluenceSpaces, deleteConfluencePage, removeJiraRemoteLinkByUrl, getPersonalSpaceKey, findTicketWikiPage, updateConfluencePageBody, ensureEpicPage } from "./confluence";
 import { maskString, maskJsonValue } from "./masking";
 import { costUsd } from "./pricing";
 import { maybeOffload, loadIfOffloaded } from "./r2helpers";
@@ -38,18 +39,28 @@ type Env = {
 const app = new Hono<{ Bindings: Env; Variables: { actor: Actor } }>();
 
 // ── Static dashboard ───────────────────────────────────────────────────────
-app.get("/", (c) => c.env.ASSETS.fetch(new Request(new URL("/home.html", c.req.url))));
-app.get("/browse", (c) => c.env.ASSETS.fetch(new Request(new URL("/sessions.html", c.req.url))));
-app.get("/u/:email", (c) => c.env.ASSETS.fetch(new Request(new URL("/profile.html", c.req.url))));
-app.get("/t/:team", (c) => c.env.ASSETS.fetch(new Request(new URL("/team.html", c.req.url))));
-app.get("/p/:slug{.+}", (c) => c.env.ASSETS.fetch(new Request(new URL("/project.html", c.req.url))));
-app.get("/project.html", (c) => c.env.ASSETS.fetch(c.req.raw));
-app.get("/dashboard.html", (c) => c.env.ASSETS.fetch(c.req.raw));
-app.get("/sessions.html", (c) => c.env.ASSETS.fetch(c.req.raw));
-app.get("/profile.html", (c) => c.env.ASSETS.fetch(c.req.raw));
-app.get("/team.html", (c) => c.env.ASSETS.fetch(c.req.raw));
-app.get("/home.html", (c) => c.env.ASSETS.fetch(c.req.raw));
-app.get("/loader.js", (c) => c.env.ASSETS.fetch(c.req.raw));
+// HTML/JS는 자주 갱신되므로 브라우저가 매번 revalidate 하도록 no-store.
+// (icons.svg/loader.js만 즉시 캐시 무효화 — 자주 안 바뀌면 immutable로 바꿀 수 있음)
+async function freshAsset(c: any, urlPath: string) {
+  const r = await c.env.ASSETS.fetch(new Request(new URL(urlPath, c.req.url)));
+  const headers = new Headers(r.headers);
+  headers.set("Cache-Control", "no-store, must-revalidate");
+  return new Response(r.body, { status: r.status, headers });
+}
+app.get("/", (c) => freshAsset(c, "/home.html"));
+app.get("/browse", (c) => freshAsset(c, "/sessions.html"));
+app.get("/u/:email", (c) => freshAsset(c, "/profile.html"));
+app.get("/t/:team", (c) => freshAsset(c, "/team.html"));
+app.get("/g/:gid", (c) => freshAsset(c, "/group.html"));
+app.get("/p/:slug{.+}", (c) => freshAsset(c, "/project.html"));
+app.get("/project.html", (c) => freshAsset(c, "/project.html"));
+app.get("/dashboard.html", (c) => freshAsset(c, "/dashboard.html"));
+app.get("/sessions.html", (c) => freshAsset(c, "/sessions.html"));
+app.get("/profile.html", (c) => freshAsset(c, "/profile.html"));
+app.get("/team.html", (c) => freshAsset(c, "/team.html"));
+app.get("/home.html", (c) => freshAsset(c, "/home.html"));
+app.get("/loader.js", (c) => freshAsset(c, "/loader.js"));
+app.get("/icons.svg", (c) => freshAsset(c, "/icons.svg"));
 app.get("/health", (c) => c.json({ ok: true, environment: (c.env as any).ENVIRONMENT || "unknown" }));
 app.get("/favicon.ico", () => new Response(null, { status: 204 }));
 
@@ -505,7 +516,27 @@ app.get("/teams", async (c) => {
     FROM events WHERE ${where} GROUP BY team, model`).bind(...bind).all<any>();
   const cby: Record<string, number> = {};
   for (const r of perTeamModelRes.results || []) cby[r.team] = (cby[r.team] || 0) + costUsd(r);
-  const rows = (rowsRes.results || []).map((r: any) => ({ ...r, cost_usd: cby[r.team] || 0 }));
+  const byTeam: Record<string, any> = {};
+  for (const r of (rowsRes.results || []) as any[]) byTeam[r.team] = { ...r, cost_usd: cby[r.team] || 0 };
+  // 레지스트리 팀(멤버 0명 포함) 머지 — sort_order 보존
+  let registry: any[] = [];
+  try {
+    const reg = await c.env.DB.prepare("SELECT name, sort_order FROM teams ORDER BY sort_order ASC, name ASC").all<any>();
+    registry = reg.results || [];
+  } catch {}
+  for (const r of registry) {
+    if (!byTeam[r.name]) byTeam[r.name] = {
+      team: r.name, users: 0, sessions: 0,
+      input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_create_tokens: 0,
+      cost_usd: 0, sort_order: r.sort_order,
+    };
+    else byTeam[r.name].sort_order = r.sort_order;
+  }
+  const rows = Object.values(byTeam).sort((a: any, b: any) => {
+    const ao = a.sort_order ?? 9999, bo = b.sort_order ?? 9999;
+    if (ao !== bo) return ao - bo;
+    return (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens);
+  });
   return c.json(rows);
 });
 
@@ -820,7 +851,35 @@ app.post("/api/sessions/:id/analyze", async (c) => {
   // 사용자의 jira 미완료 티켓 (있으면 컨텍스트로)
   let openTickets: any[] = [];
   const jira = await getJiraConn(c.env, head.user_email);
-  if (jira) openTickets = await fetchAssignedOpen(jira, 30);
+  if (jira) openTickets = await fetchAssignedOpen(jira, 80);
+
+  // ── Pre-extract: regex로 prompt/branch/commit에서 키 직접 추출 ──────────
+  // 환각 방지 + LLM이 빠뜨리는 케이스 보강.
+  const KEY_RE = /\b([A-Z][A-Z0-9]{1,9}-\d+)\b/g;
+  const regexHits: { key: string; evidence: string }[] = [];
+  const seenRx = new Set<string>();
+  const addHit = (k: string, ev: string) => {
+    const up = k.toUpperCase();
+    if (seenRx.has(up)) return;
+    seenRx.add(up);
+    regexHits.push({ key: up, evidence: ev });
+  };
+  for (let i = 0; i < userPrompts.length; i++) {
+    for (const m of userPrompts[i].matchAll(KEY_RE)) addHit(m[1], `prompt:${i+1}`);
+  }
+  if (git?.branch) for (const m of git.branch.matchAll(KEY_RE)) addHit(m[1], "branch");
+  if (git?.commits_json) {
+    try {
+      const cm = JSON.parse(git.commits_json) || [];
+      for (const c0 of cm) for (const m of String(c0.msg || "").matchAll(KEY_RE)) addHit(m[1], `commit:${(c0.sha || "").slice(0,7)}`);
+    } catch {}
+  }
+
+  // 수동 매칭(source='manual')은 보존 — 분석으로 덮어쓰지 않음
+  const manualRows = await c.env.DB.prepare(
+    "SELECT ticket_key, evidence, confidence FROM session_tickets WHERE session_id = ? AND source = 'manual'"
+  ).bind(sid).all<any>();
+  const manualKeys = new Set((manualRows.results || []).map((r: any) => r.ticket_key));
 
   const prompt = `Claude Code 세션을 분석합니다. 작업이 어떤 Jira 티켓에 해당하는지, 무엇을 했는지 한국어로 요약하세요.
 
@@ -832,8 +891,11 @@ ${git ? `- Git 브랜치: ${git.branch || "?"}
 - 최근 커밋: ${git.commits_json || "[]"}
 - 변경: ${git.diff_stat || "?"}` : ""}
 
-## 사용자가 담당하는 미완료 Jira 티켓
+## 사용자가 담당하는 미완료 Jira 티켓 (이 안에서만 고르세요)
 ${openTickets.length ? openTickets.map(t => `- ${t.key} [${t.status}] ${t.summary}`).join("\n") : "(연동 안 됨 or 없음)"}
+
+## 코드/메시지에서 자동 추출된 티켓 키 (참고; 모두 이미 후보로 포함됨)
+${regexHits.length ? regexHits.map(h => `- ${h.key}  (출처: ${h.evidence})`).join("\n") : "(없음)"}
 
 ## 사용된 도구
 ${[...toolNames].join(", ") || "(없음)"}
@@ -844,13 +906,28 @@ ${userPrompts.map((p, i) => `${i+1}. ${p}`).join("\n\n")}
 ## 어시스턴트 응답 발췌
 ${assistantSnippet.slice(0, 1500)}
 
+## 출력 규칙
+- 한 세션에서 여러 티켓에 걸쳐 작업했다면 \`tickets\`에 모두 포함하세요 (관련도 높은 순).
+- 위에 나열된 후보(미완료 + 자동추출) 안에서만 고르세요. 새 키를 환각으로 만들지 마세요.
+- 각 티켓별로 작업 비중(weight)을 합 1.0이 되도록 추정하세요.
+- 각 티켓에 대한 \`summary\`(1~2줄)와 \`key_changes\`(2~4개)를 그 티켓에 해당하는 작업만으로 구체적으로 작성하세요.
+- 최상위 \`summary\`는 세션 전체 한 줄 헤드라인 (모든 티켓 통합), \`key_changes\`는 세션 전체 핵심 변경 3~5개.
+
 ## 출력 (반드시 valid JSON만)
 {
-  "ticket_key": "ASOS-1234 또는 null",
-  "ticket_confidence": 0.0~1.0,
-  "summary": "한 줄 한국어 요약",
+  "tickets": [
+    {
+      "key": "ASOS-1234",
+      "confidence": 0.0~1.0,
+      "weight": 0.0~1.0,
+      "evidence": "왜 이 티켓인지 한 줄",
+      "summary": "이 티켓에 대해 한 일 1~2줄",
+      "key_changes": ["이 티켓 한정 변경 1", "변경 2"]
+    }
+  ],
+  "summary": "세션 전체 한 줄 헤드라인",
   "category": "feature|bugfix|refactor|docs|chore|exploration",
-  "key_changes": ["변경 1", "변경 2", "변경 3"]
+  "key_changes": ["전체 변경 1", "전체 변경 2", "전체 변경 3"]
 }`;
 
   // Gemini API 호출 — Cloudflare AI Gateway 경유 (region 차단 우회).
@@ -894,43 +971,120 @@ ${assistantSnippet.slice(0, 1500)}
   // 비용 (Gemini Flash Lite: $0.10/1M input, $0.40/1M output)
   const cost = ((usage.input_tokens || 0) * 0.10 + (usage.output_tokens || 0) * 0.40) / 1e6;
 
+  // 정규화: LLM의 tickets[] + regex hits + 미완료 후보 교차 검증
+  const candidateSet = new Set<string>([
+    ...openTickets.map((t: any) => String(t.key).toUpperCase()),
+    ...regexHits.map(h => h.key),
+  ]);
+  type Linked = { key: string; confidence: number; weight: number; evidence: string; source: "llm"|"regex"|"branch"; summary: string|null; key_changes: string[] };
+  const linkedMap = new Map<string, Linked>();
+  // (a) regex hits — 강한 신호 (commit/branch는 신뢰도 0.9, prompt는 0.7)
+  for (const h of regexHits) {
+    const isStrong = h.evidence.startsWith("branch") || h.evidence.startsWith("commit");
+    const src: Linked["source"] = h.evidence.startsWith("branch") ? "branch" : "regex";
+    linkedMap.set(h.key, { key: h.key, confidence: isStrong ? 0.9 : 0.7, weight: 0, evidence: h.evidence, source: src, summary: null, key_changes: [] });
+  }
+  // (b) LLM tickets — candidate set 안에 있는 것만 채택, 없으면 무시(환각 방지)
+  const llmList = Array.isArray(parsed.tickets) ? parsed.tickets : [];
+  for (const t of llmList) {
+    if (!t || typeof t.key !== "string") continue;
+    const key = t.key.toUpperCase();
+    if (!candidateSet.has(key)) continue;  // 환각 차단
+    const conf = typeof t.confidence === "number" ? Math.max(0, Math.min(1, t.confidence)) : 0.5;
+    const w = typeof t.weight === "number" ? Math.max(0, t.weight) : 0;
+    const ev = t.evidence ? String(t.evidence).slice(0, 200) : "llm";
+    const sm = typeof t.summary === "string" ? t.summary.slice(0, 500) : null;
+    const kc = Array.isArray(t.key_changes) ? t.key_changes.filter((x: any) => typeof x === "string").slice(0, 6) : [];
+    const prev = linkedMap.get(key);
+    if (prev) {
+      prev.weight = w || prev.weight;
+      prev.confidence = Math.max(prev.confidence, conf);
+      prev.evidence = `${prev.evidence}; llm:${ev}`;
+      prev.summary = sm || prev.summary;
+      if (kc.length) prev.key_changes = kc;
+    } else {
+      linkedMap.set(key, { key, confidence: conf, weight: w, evidence: `llm:${ev}`, source: "llm", summary: sm, key_changes: kc });
+    }
+  }
+  // weight 정규화: 합 1.0; 모두 0이면 균등 분배
+  const linked = Array.from(linkedMap.values()).slice(0, 8);
+  const sumW = linked.reduce((s, x) => s + (x.weight || 0), 0);
+  if (sumW <= 0 && linked.length) {
+    for (const x of linked) x.weight = 1 / linked.length;
+  } else if (sumW > 0) {
+    for (const x of linked) x.weight = (x.weight || 0) / sumW;
+  }
+  // confidence 높은 순 정렬, primary는 첫 번째
+  linked.sort((a, b) => b.confidence - a.confidence);
+  const ticketKeys = linked.map(x => x.key);
+  const primaryKey = ticketKeys[0] || null;
+  const primaryConf = linked[0]?.confidence ?? null;
+
+  // session_analysis: 호환 컬럼은 계속 채우되, 진짜 진실은 session_tickets
   await c.env.DB.prepare(`
-    INSERT INTO session_analysis (session_id, ticket_key, ticket_confidence, summary, category, key_changes, model, cost_usd, analyzed_by, analyzed_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO session_analysis (session_id, ticket_key, ticket_keys, ticket_confidence, summary, category, key_changes, model, cost_usd, analyzed_by, analyzed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(session_id) DO UPDATE SET
-      ticket_key=excluded.ticket_key, ticket_confidence=excluded.ticket_confidence,
+      ticket_key=excluded.ticket_key, ticket_keys=excluded.ticket_keys, ticket_confidence=excluded.ticket_confidence,
       summary=excluded.summary, category=excluded.category, key_changes=excluded.key_changes,
       model=excluded.model, cost_usd=excluded.cost_usd,
       analyzed_by=excluded.analyzed_by, analyzed_at=excluded.analyzed_at
   `).bind(
     sid,
-    parsed.ticket_key || null,
-    typeof parsed.ticket_confidence === "number" ? parsed.ticket_confidence : null,
+    primaryKey,
+    ticketKeys.length ? JSON.stringify(ticketKeys) : null,
+    primaryConf,
     parsed.summary || null,
     parsed.category || null,
     JSON.stringify(parsed.key_changes || []),
-    model,
-    cost,
-    actor.email,
-    new Date().toISOString()
+    model, cost, actor.email, new Date().toISOString()
   ).run();
 
-  // ticket 메타도 캐시
-  if (parsed.ticket_key && jira) {
-    const t = await fetchTicket(jira, parsed.ticket_key);
-    if (t) {
+  // session_tickets: manual은 보존, 비-manual만 재작성
+  await c.env.DB.prepare("DELETE FROM session_tickets WHERE session_id = ? AND source <> 'manual'").bind(sid).run();
+  const now = new Date().toISOString();
+  let rank = 0;
+  for (const x of linked) {
+    if (manualKeys.has(x.key)) continue;  // manual이 이미 있으면 자동 매칭으로 덮지 않음
+    await c.env.DB.prepare(`
+      INSERT OR REPLACE INTO session_tickets
+        (session_id, ticket_key, rank, confidence, evidence, source, weight, summary, key_changes, created_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(sid, x.key, rank++, x.confidence, x.evidence, x.source, x.weight, x.summary, JSON.stringify(x.key_changes || []), actor.email, now).run();
+  }
+  // manual 키들도 weight를 다시 쓸 필요는 없음 (사람이 정한 값 유지)
+
+  // 티켓 메타 캐시 (LLM/regex로 잡힌 모든 키 — manual 포함)
+  const allKeysForCache = new Set<string>([...ticketKeys, ...manualKeys]);
+  if (jira && allKeysForCache.size) {
+    for (const tk of allKeysForCache) {
+      const t = await fetchTicket(jira, tk);
+      if (!t) continue;
       await c.env.DB.prepare(`
-        INSERT INTO jira_tickets (key, user_email, summary, status, assignee_email, url, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO jira_tickets (key, user_email, team, summary, status, assignee_email, url, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(key, user_email) DO UPDATE SET
-          summary=excluded.summary, status=excluded.status, assignee_email=excluded.assignee_email,
-          url=excluded.url, fetched_at=excluded.fetched_at
-      `).bind(t.key, head.user_email, t.summary, t.status, t.assignee_email, t.url, new Date().toISOString()).run();
+          team=excluded.team, summary=excluded.summary, status=excluded.status,
+          assignee_email=excluded.assignee_email, url=excluded.url, fetched_at=excluded.fetched_at
+      `).bind(t.key, head.user_email, head.team || null, t.summary, t.status, t.assignee_email, t.url, now).run();
     }
   }
 
   await audit(c.env, actor, "analyze_session", head.user_email, sid, c.req.header("cf-connecting-ip") || null);
   return c.json({ ok: true, ...parsed, cost_usd: cost });
+});
+
+// 세션 ID만 알 때 owner email/team을 알아내기 위한 가벼운 메타 조회.
+// /browse 페이지가 ?session=만으로도 deep-link되도록 클라이언트가 이걸 호출.
+app.get("/api/sessions/:id/head", async (c) => {
+  const actor = c.get("actor");
+  const sid = c.req.param("id");
+  const head: any = await c.env.DB.prepare(
+    "SELECT MAX(user_email) user_email, MAX(team) team, MAX(user_name) user_name FROM events WHERE session_id = ?"
+  ).bind(sid).first();
+  if (!head?.user_email) return c.json({ error: "not found" }, 404);
+  if (!canSeeUser(actor, head.user_email, head.team)) return c.json({ error: "forbidden" }, 403);
+  return c.json({ session_id: sid, user_email: head.user_email, team: head.team || null, user_name: head.user_name || null });
 });
 
 app.get("/api/sessions/:id/analysis", async (c) => {
@@ -942,14 +1096,1044 @@ app.get("/api/sessions/:id/analysis", async (c) => {
   if (!head?.user_email) return c.json(null);
   if (!canSeeUser(actor, head.user_email, head.team)) return c.json({ error: "forbidden" }, 403);
   const a: any = await c.env.DB.prepare("SELECT * FROM session_analysis WHERE session_id = ?").bind(sid).first();
-  if (!a) return c.json(null);
-  let ticket: any = null;
-  if (a.ticket_key) {
-    ticket = await c.env.DB.prepare(
-      "SELECT * FROM jira_tickets WHERE key = ? AND user_email = ?"
-    ).bind(a.ticket_key, head.user_email).first();
+  // session_tickets가 진실의 소스. analysis 행이 없어도 manual 링크는 있을 수 있음.
+  const stRows = await c.env.DB.prepare(
+    "SELECT ticket_key, rank, confidence, evidence, source, weight, summary, key_changes FROM session_tickets WHERE session_id = ? ORDER BY rank ASC, confidence DESC"
+  ).bind(sid).all<any>();
+  const links = (stRows.results || []) as any[];
+  const keys = links.map((r: any) => r.ticket_key);
+  if (!a && !keys.length) return c.json(null);
+  let tickets: any[] = [];
+  if (keys.length) {
+    const placeholders = keys.map(() => "?").join(",");
+    // user_email 매치 우선, 없으면 같은 team 매치 폴백 (team-shared cache)
+    const r = await c.env.DB.prepare(
+      `SELECT * FROM jira_tickets WHERE key IN (${placeholders}) AND (user_email = ? OR team = ?)`
+    ).bind(...keys, head.user_email, head.team || "").all<any>();
+    const byKey: Record<string, any> = {};
+    for (const t of (r.results || [])) {
+      // 동일 키에 user/team 모두 있으면 user 우선
+      if (!byKey[t.key] || t.user_email === head.user_email) byKey[t.key] = t;
+    }
+    tickets = links.map((l: any) => {
+      const meta = byKey[l.ticket_key] || { key: l.ticket_key };
+      let kc: string[] = [];
+      try { kc = l.key_changes ? JSON.parse(l.key_changes) : []; } catch {}
+      return {
+        ...meta,
+        confidence: l.confidence, weight: l.weight, source: l.source, evidence: l.evidence, rank: l.rank,
+        ticket_summary: l.summary || null,    // 티켓별 요약 (jira summary와 별개)
+        ticket_key_changes: kc,
+      };
+    });
   }
-  return c.json({ ...a, key_changes: a.key_changes ? JSON.parse(a.key_changes) : [], ticket });
+  return c.json({
+    ...(a || { session_id: sid }),
+    key_changes: a?.key_changes ? JSON.parse(a.key_changes) : [],
+    ticket_keys: keys,
+    tickets,                            // 배열 — 새 클라이언트 (각 항목에 confidence/weight/source 포함)
+    ticket: tickets[0] || null,         // 호환 — 기존 클라이언트
+  });
+});
+
+// ── Ticket context (skill: /tracker-ticket context KEY) ────────────────
+// 풍부한 jira 컨텍스트를 Claude 세션에 inject하기 위한 엔드포인트.
+app.get("/api/tickets/:key/context", async (c) => {
+  const actor = c.get("actor");
+  const key = c.req.param("key").toUpperCase();
+  // 사용자의 jira 토큰 우선; 없으면 같은 팀의 다른 사용자 jira 토큰 폴백
+  let conn = await getJiraConn(c.env, actor.email);
+  if (!conn && actor.team) {
+    const peers = await c.env.DB.prepare(
+      "SELECT user_email FROM tokens WHERE team = ? AND user_email <> ? AND revoked_at IS NULL LIMIT 5"
+    ).bind(actor.team, actor.email).all<any>();
+    for (const p of (peers.results || [])) {
+      conn = await getJiraConn(c.env, p.user_email);
+      if (conn) break;
+    }
+  }
+  if (!conn) return c.json({ error: "no jira integration available" }, 503);
+  const ctx = await fetchTicketContext(conn, key, { maxComments: 8 });
+  if (!ctx) return c.json({ error: "ticket not found" }, 404);
+  // Confluence 관련 페이지(직접 link + 키워드 검색) — opt-out 가능: ?confluence=0
+  const wantConf = c.req.query("confluence") !== "0";
+  let confluence: any[] = [];
+  if (wantConf) {
+    try { confluence = await fetchConfluenceForTicket(conn, key, ctx.summary || "", { maxLinked: 5, maxSearched: 3 }); } catch {}
+  }
+  return c.json({ ...ctx, confluence });
+});
+
+// ── Confluence 시드 (테스트용, admin만) ─────────────────────────────────
+// POST /api/admin/test/seed-confluence  body: { ticket_key, space_key? }
+// 1) 사용 가능한 space 조회 (없으면 자동 선택)
+// 2) 테스트 페이지 생성 (티켓 정보를 문서화한 form)
+// 3) 해당 티켓에 Confluence 페이지를 remote link로 추가
+app.post("/api/admin/test/seed-confluence", async (c) => {
+  const actor = c.get("actor");
+  if (!isAdmin(actor)) return c.json({ error: "forbidden (admin only)" }, 403);
+  const body = await c.req.json<any>().catch(() => ({}));
+  const ticketKey = String(body.ticket_key || "").trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9]{1,9}-\d+$/.test(ticketKey)) return c.json({ error: "invalid ticket_key" }, 400);
+  const conn = await getJiraConn(c.env, actor.email);
+  if (!conn) return c.json({ error: "no jira integration on actor" }, 503);
+  // 티켓 존재 확인
+  const ticket = await fetchTicket(conn, ticketKey);
+  if (!ticket) return c.json({ error: "ticket not found" }, 404);
+  // space 결정: 명시 → personal → 첫 visible
+  let spaceKey = body.space_key as string | undefined;
+  if (!spaceKey) spaceKey = await getPersonalSpaceKey(conn) || undefined;
+  let availableSpaces: any[] = [];
+  if (!spaceKey) {
+    availableSpaces = await listConfluenceSpaces(conn, 20);
+    if (!availableSpaces.length) return c.json({ error: "no Confluence spaces visible — provide space_key" }, 503);
+    spaceKey = availableSpaces[0].key;
+  }
+  // 페이지 본문 (storage XHTML) — 일반적인 작업 노트 형식
+  const now = new Date().toISOString();
+  const html = `
+    <h1>${escapeXml(ticket.summary || ticketKey)}</h1>
+    <p><em>${escapeXml(ticketKey)} 작업 노트 · ${now.slice(0,10)} 작성</em></p>
+    <h2>개요</h2>
+    <p>${escapeXml(ticket.summary || "(요약 없음)")} 관련 작업의 배경, 범위, 일정을 정리합니다.</p>
+    <h2>관련 티켓</h2>
+    <ul><li><a href="${ticket.url}">${ticketKey}</a> — ${escapeXml(ticket.summary || "")} (${escapeXml(ticket.status || "-")})</li></ul>
+    <h2>배경</h2>
+    <p>본 작업은 ${escapeXml(ticket.summary || ticketKey)}의 요구사항을 정리하고 우선순위를 결정하기 위한 사전 검토 단계입니다. 이해관계자 의견과 도메인 제약을 반영하여 다음 섹션의 범위를 확정합니다.</p>
+    <h2>범위 (Scope)</h2>
+    <ul>
+      <li>요구사항 수집 및 정의</li>
+      <li>기술 검토 및 위험 식별</li>
+      <li>일정 산정 및 마일스톤 설정</li>
+      <li>완료 조건(DoD) 합의</li>
+    </ul>
+    <h2>고려 사항</h2>
+    <ul>
+      <li>의존 시스템 및 데이터 흐름</li>
+      <li>성능 / 보안 / 운영 영향도</li>
+      <li>롤백 및 점진적 출시 전략</li>
+    </ul>
+    <h2>마일스톤</h2>
+    <table><tbody>
+      <tr><th>단계</th><th>산출물</th><th>예상 기간</th></tr>
+      <tr><td>설계</td><td>설계 문서, 데이터 모델</td><td>1주</td></tr>
+      <tr><td>구현</td><td>핵심 기능 + 단위 테스트</td><td>2주</td></tr>
+      <tr><td>검증</td><td>통합 테스트 + 리뷰</td><td>1주</td></tr>
+    </tbody></table>
+    <h2>이력</h2>
+    <table><tbody>
+      <tr><th>일자</th><th>변경</th><th>담당</th></tr>
+      <tr><td>${now.slice(0,10)}</td><td>최초 작성</td><td>${escapeXml(actor.name || actor.email)}</td></tr>
+    </tbody></table>
+  `.trim();
+  const pageTitle = `${ticketKey} 작업 노트 — ${(ticket.summary || "").slice(0, 60)}`;
+  const page = await createConfluencePage(conn, spaceKey!, pageTitle, html);
+  if (!page.ok) return c.json({ error: "page create failed: " + page.error, tried_space: spaceKey, available_spaces: availableSpaces.map(s => s.key) }, 500);
+  // remote link 추가
+  const link = await addJiraRemoteLink(conn, ticketKey, page.url!, pageTitle);
+  await audit(c.env, actor, "confluence_seed", actor.email, ticketKey, c.req.header("cf-connecting-ip") || null);
+  return c.json({
+    ok: true,
+    ticket_key: ticketKey,
+    space_key: spaceKey,
+    page_id: page.id,
+    page_url: page.url,
+    jira_link_ok: link.ok,
+    jira_link_error: link.error || null,
+    note: "이제 GET /api/tickets/" + ticketKey + "/context 호출 시 confluence[] 에 이 페이지가 포함됩니다.",
+  });
+});
+
+function escapeXml(s: string): string {
+  return String(s || "").replace(/[<>&"']/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;","\"":"&quot;","'":"&apos;"}[c] as string));
+}
+
+// 시드 정리: Confluence 페이지 삭제 + Jira remote link 제거 (admin only)
+app.post("/api/admin/test/teardown-confluence", async (c) => {
+  const actor = c.get("actor");
+  if (!isAdmin(actor)) return c.json({ error: "forbidden" }, 403);
+  const body = await c.req.json<any>().catch(() => ({}));
+  const pageId = String(body.page_id || "").trim();
+  const ticketKey = String(body.ticket_key || "").trim().toUpperCase();
+  if (!pageId) return c.json({ error: "page_id required" }, 400);
+  const conn = await getJiraConn(c.env, actor.email);
+  if (!conn) return c.json({ error: "no jira integration on actor" }, 503);
+  const pageUrl = `${conn.base_url.replace(/\/$/, "")}/wiki/spaces/.+/pages/${pageId}`;
+  // Jira remote link 제거 (티켓 키 제공 시)
+  let linkRemoved = 0, linkErr: string | null = null;
+  if (ticketKey) {
+    const r = await removeJiraRemoteLinkByUrl(conn, ticketKey, `/pages/${pageId}`);
+    linkRemoved = r.removed; linkErr = r.error || null;
+  }
+  // Confluence 페이지 삭제
+  const del = await deleteConfluencePage(conn, pageId);
+  await audit(c.env, actor, "confluence_teardown", actor.email, ticketKey || pageId, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: del.ok, page_deleted: del.ok, page_error: del.error || null, jira_link_removed: linkRemoved, jira_link_error: linkErr });
+});
+
+// ── Session-ticket segments (시간축 위 명시적 경계) ──────────────────────
+async function recomputeWeightsFromSegments(env: Env, sid: string) {
+  // segments 기반 duration 합 → session_tickets.weight 자동 갱신.
+  const segs = await env.DB.prepare(
+    "SELECT ticket_key, started_at, COALESCE(ended_at, datetime('now')) ended_at FROM session_ticket_segments WHERE session_id = ?"
+  ).bind(sid).all<any>();
+  const dur: Record<string, number> = {};
+  let total = 0;
+  for (const s of (segs.results || []) as any[]) {
+    const d = (new Date(s.ended_at).getTime() - new Date(s.started_at).getTime()) / 1000;
+    if (d <= 0) continue;
+    dur[s.ticket_key] = (dur[s.ticket_key] || 0) + d;
+    total += d;
+  }
+  if (total <= 0) return;
+  for (const [key, sec] of Object.entries(dur)) {
+    const w = sec / total;
+    // session_tickets에 없으면 추가 (segment-only 키)
+    await env.DB.prepare(`
+      INSERT INTO session_tickets (session_id, ticket_key, rank, confidence, evidence, source, weight, created_by, created_at)
+      VALUES (?, ?, 0, 1.0, 'segment', 'manual', ?, 'segment', datetime('now'))
+      ON CONFLICT(session_id, ticket_key) DO UPDATE SET weight = ?
+    `).bind(sid, key, w, w).run();
+  }
+}
+
+app.post("/api/sessions/:id/segments/start", async (c) => {
+  const actor = c.get("actor");
+  const sid = c.req.param("id");
+  const body = await c.req.json<any>().catch(() => ({}));
+  const key = String(body.ticket_key || "").trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9]{1,9}-\d+$/.test(key)) return c.json({ error: "invalid ticket key" }, 400);
+  const head: any = await c.env.DB.prepare(
+    "SELECT MAX(user_email) user_email, MAX(team) team FROM events WHERE session_id = ?"
+  ).bind(sid).first();
+  // 세션이 events에 없으면 actor를 신뢰 (세션이 막 시작된 경우 hooks가 events 채우기 전)
+  const owner = head?.user_email || actor.email;
+  const team = head?.team || actor.team;
+  if (!canSeeUser(actor, owner, team)) return c.json({ error: "forbidden" }, 403);
+  const now = new Date().toISOString();
+  // 이전 open segment 자동 close
+  await c.env.DB.prepare(
+    "UPDATE session_ticket_segments SET ended_at = ?, user_action = 'switch' WHERE session_id = ? AND ended_at IS NULL"
+  ).bind(now, sid).run();
+  // 새 segment 시작
+  const r = await c.env.DB.prepare(`
+    INSERT INTO session_ticket_segments (session_id, ticket_key, started_at, user_action, created_by)
+    VALUES (?, ?, ?, 'start', ?)
+  `).bind(sid, key, now, actor.email).run();
+  // 매칭에 manual 링크도 보장 (분석 후 보존됨)
+  await c.env.DB.prepare(`
+    INSERT INTO session_tickets (session_id, ticket_key, rank, confidence, evidence, source, weight, created_by, created_at)
+    VALUES (?, ?, 0, 1.0, 'segment-start', 'manual', 0, ?, ?)
+    ON CONFLICT(session_id, ticket_key) DO UPDATE SET source='manual', evidence='segment-start'
+  `).bind(sid, key, actor.email, now).run();
+  // ── Auto-group: 같은 (user, repo)로 묶이는 모든 세션이 한 그룹에 자동 합류 ──
+  // 사용자는 /tracker-ticket start KEY 한 번만 하면 되고, 워커/하위 세션은 자동.
+  let groupInfo: any = null;
+  try {
+    const repoInfo: any = await c.env.DB.prepare(
+      "SELECT remote_url, repo_root FROM session_git WHERE session_id = ?"
+    ).bind(sid).first();
+    const repoRemote = repoInfo?.remote_url || null;
+    const repoRoot = repoInfo?.repo_root || null;
+    // 이 세션이 이미 어느 그룹에 속해 있는지 확인 (수동 attach 등)
+    const existing: any = await c.env.DB.prepare(
+      "SELECT group_id FROM session_group_members WHERE session_id = ? LIMIT 1"
+    ).bind(sid).first();
+    let group: any = null;
+    if (existing?.group_id) {
+      group = await c.env.DB.prepare("SELECT * FROM session_groups WHERE id = ?")
+        .bind(existing.group_id).first<any>();
+    }
+    if (!group) {
+      group = await findOpenGroupByRepo(c.env, owner, repoRemote, repoRoot);
+    }
+    if (!group && (repoRemote || repoRoot)) {
+      // 새 그룹: orchestrator로 이 세션 등록
+      const gid = genGroupId();
+      const repoLabel = repoRemote
+        ? repoRemote.replace(/^.*[/:]/, "").replace(/\.git$/, "")
+        : (repoRoot || "").split("/").slice(-1)[0];
+      const groupName = `${key} · ${repoLabel || "auto"}`;
+      const nowStr = new Date().toISOString();
+      await c.env.DB.prepare(`
+        INSERT INTO session_groups
+          (id, name, owner_email, team, repo_remote, repo_root, active_ticket_key, created_at, last_activity_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(gid, groupName, owner, team || null, repoRemote, repoRoot, key, nowStr, nowStr).run();
+      group = { id: gid, name: groupName, active_ticket_key: key };
+      await ensureMember(c.env, gid, sid, "orchestrator");
+    } else if (group) {
+      // 기존 그룹 재사용: 멤버십 보장 + active ticket 갱신 + 모든 멤버에게 segment 전파
+      await ensureMember(c.env, group.id, sid, group.active_ticket_key === null ? "orchestrator" : "worker");
+      await c.env.DB.prepare(
+        "UPDATE session_groups SET active_ticket_key = ?, last_activity_at = ? WHERE id = ?"
+      ).bind(key, new Date().toISOString(), group.id).run();
+      // 그룹 내 다른 멤버들에게도 segment 전파
+      const others = await c.env.DB.prepare(
+        "SELECT session_id FROM session_group_members WHERE group_id = ? AND session_id != ?"
+      ).bind(group.id, sid).all<any>();
+      for (const m of (others.results || []) as any[]) {
+        await openSegmentForSession(c.env, m.session_id, key, actor.email, "group-propagate");
+      }
+      group.active_ticket_key = key;
+    }
+    if (group) groupInfo = { id: group.id, name: group.name, active_ticket_key: group.active_ticket_key };
+  } catch { /* group propagation is best-effort */ }
+
+  // 티켓 컨텍스트도 함께 응답 (skill에서 바로 inject 가능)
+  let context: any = null;
+  const conn = await getJiraConn(c.env, owner);
+  if (conn) context = await fetchTicketContext(conn, key, { maxComments: 5 });
+  await audit(c.env, actor, "segment_start", owner, sid, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: true, segment_id: (r as any).meta?.last_row_id, ticket_key: key, started_at: now, context, group: groupInfo });
+});
+
+app.post("/api/sessions/:id/segments/end", async (c) => {
+  const actor = c.get("actor");
+  const sid = c.req.param("id");
+  const head: any = await c.env.DB.prepare(
+    "SELECT MAX(user_email) user_email, MAX(team) team FROM events WHERE session_id = ?"
+  ).bind(sid).first();
+  const owner = head?.user_email || actor.email;
+  if (!canSeeUser(actor, owner, head?.team)) return c.json({ error: "forbidden" }, 403);
+  const now = new Date().toISOString();
+  const r = await c.env.DB.prepare(
+    "UPDATE session_ticket_segments SET ended_at = ?, user_action = 'end' WHERE session_id = ? AND ended_at IS NULL"
+  ).bind(now, sid).run();
+  await recomputeWeightsFromSegments(c.env, sid);
+  return c.json({ ok: true, closed: (r as any).meta?.changes || 0, ended_at: now });
+});
+
+app.get("/api/sessions/:id/segments", async (c) => {
+  const actor = c.get("actor");
+  const sid = c.req.param("id");
+  const head: any = await c.env.DB.prepare(
+    "SELECT MAX(user_email) user_email, MAX(team) team FROM events WHERE session_id = ?"
+  ).bind(sid).first();
+  if (head?.user_email && !canSeeUser(actor, head.user_email, head.team)) return c.json({ error: "forbidden" }, 403);
+  const r = await c.env.DB.prepare(
+    "SELECT id, ticket_key, started_at, ended_at, user_action, jira_comment_id FROM session_ticket_segments WHERE session_id = ? ORDER BY started_at ASC"
+  ).bind(sid).all<any>();
+  return c.json(r.results || []);
+});
+
+// ── Groups: bundle multiple sessions (e.g. agent-team workers) into one task ──
+function genGroupId() {
+  return "g_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+}
+
+// Find an open group matching (user, repo). Repo identity prefers remote_url
+// (stable across worktrees) and falls back to repo_root for repos w/o remote.
+// TTL: groups inactive for >7d are ignored — a fresh ticket starts a new group.
+async function findOpenGroupByRepo(
+  env: Env,
+  ownerEmail: string,
+  repoRemote: string | null,
+  repoRoot: string | null,
+): Promise<any | null> {
+  if (!repoRemote && !repoRoot) return null;
+  const ttl = new Date(Date.now() - 7 * 86400_000).toISOString();
+  return await env.DB.prepare(`
+    SELECT * FROM session_groups
+    WHERE owner_email = ?
+      AND closed_at IS NULL
+      AND COALESCE(last_activity_at, created_at) > ?
+      AND ((? IS NOT NULL AND repo_remote = ?) OR (? IS NOT NULL AND repo_root = ?))
+    ORDER BY COALESCE(last_activity_at, created_at) DESC
+    LIMIT 1
+  `).bind(ownerEmail, ttl, repoRemote, repoRemote, repoRoot, repoRoot).first<any>();
+}
+
+// Attach a session to a group (idempotent).
+async function ensureMember(env: Env, gid: string, sid: string, role: string) {
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO session_group_members (group_id, session_id, role, joined_at) VALUES (?, ?, ?, ?)"
+  ).bind(gid, sid, role, now).run();
+  await env.DB.prepare(
+    "UPDATE session_groups SET last_activity_at = ? WHERE id = ?"
+  ).bind(now, gid).run();
+}
+
+// Open a fresh ticket segment for the given session (closing any prior open one).
+async function openSegmentForSession(
+  env: Env,
+  sid: string,
+  ticketKey: string,
+  createdBy: string,
+  evidence: string = "auto-group",
+) {
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    "UPDATE session_ticket_segments SET ended_at = ?, user_action = 'switch' WHERE session_id = ? AND ended_at IS NULL"
+  ).bind(now, sid).run();
+  await env.DB.prepare(
+    "INSERT INTO session_ticket_segments (session_id, ticket_key, started_at, user_action, created_by) VALUES (?, ?, ?, 'start', ?)"
+  ).bind(sid, ticketKey, now, createdBy).run();
+  await env.DB.prepare(`
+    INSERT INTO session_tickets (session_id, ticket_key, rank, confidence, evidence, source, weight, created_by, created_at)
+    VALUES (?, ?, 0, 1.0, ?, 'manual', 0, ?, ?)
+    ON CONFLICT(session_id, ticket_key) DO UPDATE SET source='manual', evidence=excluded.evidence
+  `).bind(sid, ticketKey, evidence, createdBy, now).run();
+}
+
+// Create a group, optionally auto-attach the caller's session as orchestrator.
+app.post("/api/groups", async (c) => {
+  const actor = c.get("actor");
+  const body = await c.req.json<any>().catch(() => ({}));
+  const id = genGroupId();
+  const name = body.name ? String(body.name).slice(0, 200) : null;
+  const sid = body.session_id ? String(body.session_id).trim() : null;
+  const role = body.role ? String(body.role).slice(0, 32) : (sid ? "orchestrator" : null);
+  const now = new Date().toISOString();
+  await c.env.DB.prepare(
+    "INSERT INTO session_groups (id, name, owner_email, team, created_at) VALUES (?, ?, ?, ?, ?)"
+  ).bind(id, name, actor.email, actor.team || null, now).run();
+  if (sid) {
+    await c.env.DB.prepare(
+      "INSERT OR IGNORE INTO session_group_members (group_id, session_id, role, joined_at) VALUES (?, ?, ?, ?)"
+    ).bind(id, sid, role, now).run();
+  }
+  await audit(c.env, actor, "group_create", actor.email, sid, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: true, group_id: id, name, role, owner_email: actor.email });
+});
+
+// Attach a session to an existing group.
+app.post("/api/groups/:gid/attach", async (c) => {
+  const actor = c.get("actor");
+  const gid = c.req.param("gid");
+  const body = await c.req.json<any>().catch(() => ({}));
+  const sid = String(body.session_id || "").trim();
+  const role = body.role ? String(body.role).slice(0, 32) : "worker";
+  if (!sid) return c.json({ error: "session_id required" }, 400);
+  const grp: any = await c.env.DB.prepare(
+    "SELECT owner_email, team, closed_at FROM session_groups WHERE id = ?"
+  ).bind(gid).first();
+  if (!grp) return c.json({ error: "group not found" }, 404);
+  if (grp.closed_at) return c.json({ error: "group closed" }, 400);
+  if (!canSeeUser(actor, grp.owner_email, grp.team)) return c.json({ error: "forbidden" }, 403);
+  const now = new Date().toISOString();
+  await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO session_group_members (group_id, session_id, role, joined_at) VALUES (?, ?, ?, ?)"
+  ).bind(gid, sid, role, now).run();
+  await audit(c.env, actor, "group_attach", grp.owner_email, sid, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: true, group_id: gid, session_id: sid, role });
+});
+
+// List groups visible to the caller (own + admin sees all).
+app.get("/api/groups", async (c) => {
+  const actor = c.get("actor");
+  const limit = Math.min(200, parseInt(c.req.query("limit") || "50", 10));
+  const stmt = isAdmin(actor)
+    ? c.env.DB.prepare("SELECT * FROM session_groups ORDER BY created_at DESC LIMIT ?").bind(limit)
+    : c.env.DB.prepare("SELECT * FROM session_groups WHERE owner_email = ? ORDER BY created_at DESC LIMIT ?").bind(actor.email, limit);
+  const r = await stmt.all<any>();
+  // attach member counts
+  const out: any[] = [];
+  for (const g of (r.results || []) as any[]) {
+    const cnt: any = await c.env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM session_group_members WHERE group_id = ?"
+    ).bind(g.id).first();
+    out.push({ ...g, member_count: cnt?.n || 0 });
+  }
+  return c.json(out);
+});
+
+// Group detail: members + tickets-rollup.
+app.get("/api/groups/:gid", async (c) => {
+  const actor = c.get("actor");
+  const gid = c.req.param("gid");
+  const grp: any = await c.env.DB.prepare("SELECT * FROM session_groups WHERE id = ?").bind(gid).first();
+  if (!grp) return c.json({ error: "group not found" }, 404);
+  if (!canSeeUser(actor, grp.owner_email, grp.team)) return c.json({ error: "forbidden" }, 403);
+  const members = await c.env.DB.prepare(`
+    SELECT m.session_id, m.role, m.joined_at,
+           (SELECT MAX(cwd) FROM events WHERE session_id = m.session_id) AS cwd,
+           (SELECT MAX(model) FROM events WHERE session_id = m.session_id) AS model,
+           (SELECT MIN(ts) FROM events WHERE session_id = m.session_id) AS started,
+           (SELECT MAX(ts) FROM events WHERE session_id = m.session_id) AS last_event,
+           (SELECT COUNT(*) FROM events WHERE session_id = m.session_id) AS events,
+           (SELECT COALESCE(SUM(input_tokens),0) + COALESCE(SUM(output_tokens),0) +
+                   COALESCE(SUM(cache_read_tokens),0) + COALESCE(SUM(cache_create_tokens),0)
+            FROM events WHERE session_id = m.session_id) AS tokens,
+           (SELECT text FROM messages WHERE session_id = m.session_id AND role = 'user' AND text IS NOT NULL ORDER BY seq ASC LIMIT 1) AS first_user_msg
+    FROM session_group_members m WHERE m.group_id = ? ORDER BY m.joined_at ASC
+  `).bind(gid).all<any>();
+  const tickets = await c.env.DB.prepare(`
+    SELECT s.ticket_key,
+           COUNT(DISTINCT s.session_id) AS sessions,
+           COUNT(*) AS segments,
+           SUM((julianday(COALESCE(s.ended_at, datetime('now'))) - julianday(s.started_at)) * 86400) AS sec,
+           MIN(s.started_at) AS first_started,
+           MAX(COALESCE(s.ended_at, datetime('now'))) AS last_ended
+    FROM session_ticket_segments s
+    WHERE s.session_id IN (SELECT session_id FROM session_group_members WHERE group_id = ?)
+    GROUP BY s.ticket_key ORDER BY sec DESC
+  `).bind(gid).all<any>();
+  const comments = await c.env.DB.prepare(
+    "SELECT ticket_key, jira_comment_id, posted_at FROM group_ticket_comments WHERE group_id = ?"
+  ).bind(gid).all<any>();
+  return c.json({
+    ...grp,
+    members: members.results || [],
+    tickets: tickets.results || [],
+    writeback_comments: comments.results || [],
+  });
+});
+
+// Start a ticket segment for ALL member sessions at once.
+app.post("/api/groups/:gid/segments/start", async (c) => {
+  const actor = c.get("actor");
+  const gid = c.req.param("gid");
+  const body = await c.req.json<any>().catch(() => ({}));
+  const key = String(body.ticket_key || "").trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9]{1,9}-\d+$/.test(key)) return c.json({ error: "invalid ticket key" }, 400);
+  const grp: any = await c.env.DB.prepare(
+    "SELECT owner_email, team, closed_at FROM session_groups WHERE id = ?"
+  ).bind(gid).first();
+  if (!grp) return c.json({ error: "group not found" }, 404);
+  if (grp.closed_at) return c.json({ error: "group closed" }, 400);
+  if (!canSeeUser(actor, grp.owner_email, grp.team)) return c.json({ error: "forbidden" }, 403);
+  const members = await c.env.DB.prepare(
+    "SELECT session_id FROM session_group_members WHERE group_id = ?"
+  ).bind(gid).all<any>();
+  const sids: string[] = (members.results || []).map((m: any) => m.session_id);
+  const now = new Date().toISOString();
+  for (const sid of sids) {
+    await c.env.DB.prepare(
+      "UPDATE session_ticket_segments SET ended_at = ?, user_action = 'switch' WHERE session_id = ? AND ended_at IS NULL"
+    ).bind(now, sid).run();
+    await c.env.DB.prepare(
+      "INSERT INTO session_ticket_segments (session_id, ticket_key, started_at, user_action, created_by) VALUES (?, ?, ?, 'start', ?)"
+    ).bind(sid, key, now, actor.email).run();
+    await c.env.DB.prepare(`
+      INSERT INTO session_tickets (session_id, ticket_key, rank, confidence, evidence, source, weight, created_by, created_at)
+      VALUES (?, ?, 0, 1.0, 'group-segment-start', 'manual', 0, ?, ?)
+      ON CONFLICT(session_id, ticket_key) DO UPDATE SET source='manual', evidence='group-segment-start'
+    `).bind(sid, key, actor.email, now).run();
+  }
+  let context: any = null;
+  const conn = await getJiraConn(c.env, grp.owner_email);
+  if (conn) context = await fetchTicketContext(conn, key, { maxComments: 5 });
+  await audit(c.env, actor, "group_segment_start", grp.owner_email, gid, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: true, group_id: gid, ticket_key: key, sessions: sids.length, started_at: now, context });
+});
+
+// End any open segment in all member sessions.
+app.post("/api/groups/:gid/segments/end", async (c) => {
+  const actor = c.get("actor");
+  const gid = c.req.param("gid");
+  const grp: any = await c.env.DB.prepare(
+    "SELECT owner_email, team FROM session_groups WHERE id = ?"
+  ).bind(gid).first();
+  if (!grp) return c.json({ error: "group not found" }, 404);
+  if (!canSeeUser(actor, grp.owner_email, grp.team)) return c.json({ error: "forbidden" }, 403);
+  const now = new Date().toISOString();
+  const r = await c.env.DB.prepare(
+    "UPDATE session_ticket_segments SET ended_at = ?, user_action = 'end' WHERE ended_at IS NULL AND session_id IN (SELECT session_id FROM session_group_members WHERE group_id = ?)"
+  ).bind(now, gid).run();
+  const members = await c.env.DB.prepare(
+    "SELECT session_id FROM session_group_members WHERE group_id = ?"
+  ).bind(gid).all<any>();
+  for (const m of (members.results || []) as any[]) await recomputeWeightsFromSegments(c.env, m.session_id);
+  return c.json({ ok: true, closed: (r as any).meta?.changes || 0, ended_at: now });
+});
+
+// Aggregated writeback: one Jira comment per ticket combining all member sessions.
+app.post("/api/groups/:gid/writeback", async (c) => {
+  const actor = c.get("actor");
+  const gid = c.req.param("gid");
+  const grp: any = await c.env.DB.prepare("SELECT * FROM session_groups WHERE id = ?").bind(gid).first();
+  if (!grp) return c.json({ error: "group not found" }, 404);
+  if (!canSeeUser(actor, grp.owner_email, grp.team)) return c.json({ error: "forbidden" }, 403);
+  const now = new Date().toISOString();
+  await c.env.DB.prepare(
+    "UPDATE session_ticket_segments SET ended_at = ?, user_action = COALESCE(user_action, 'end') WHERE ended_at IS NULL AND session_id IN (SELECT session_id FROM session_group_members WHERE group_id = ?)"
+  ).bind(now, gid).run();
+  const members = await c.env.DB.prepare(
+    "SELECT session_id, role FROM session_group_members WHERE group_id = ?"
+  ).bind(gid).all<any>();
+  const sids: string[] = (members.results || []).map((m: any) => m.session_id);
+  for (const sid of sids) await recomputeWeightsFromSegments(c.env, sid);
+  // Per-ticket / per-session aggregation.
+  const segs = await c.env.DB.prepare(`
+    SELECT ticket_key, session_id,
+           SUM((julianday(COALESCE(ended_at, datetime('now'))) - julianday(started_at)) * 86400) AS sec,
+           MIN(started_at) AS first_started,
+           MAX(COALESCE(ended_at, datetime('now'))) AS last_ended,
+           COUNT(*) AS n
+    FROM session_ticket_segments
+    WHERE session_id IN (SELECT session_id FROM session_group_members WHERE group_id = ?)
+    GROUP BY ticket_key, session_id
+    ORDER BY ticket_key, first_started
+  `).bind(gid).all<any>();
+  const byTicket: Record<string, any[]> = {};
+  for (const r of (segs.results || []) as any[]) {
+    (byTicket[r.ticket_key] = byTicket[r.ticket_key] || []).push(r);
+  }
+  // Per-session ticket summaries (key_changes etc.)
+  const stRows = await c.env.DB.prepare(`
+    SELECT session_id, ticket_key, summary, key_changes
+    FROM session_tickets
+    WHERE session_id IN (SELECT session_id FROM session_group_members WHERE group_id = ?)
+  `).bind(gid).all<any>();
+  const stMap: Record<string, Record<string, any>> = {};
+  for (const r of (stRows.results || []) as any[]) {
+    (stMap[r.ticket_key] = stMap[r.ticket_key] || {})[r.session_id] = r;
+  }
+  const conn = await getJiraConn(c.env, grp.owner_email);
+  const results: any[] = [];
+  for (const [ticket_key, perSession] of Object.entries(byTicket)) {
+    if (!conn) { results.push({ ticket_key, ok: false, error: "no jira" }); continue; }
+    const totalSec = perSession.reduce((s, r) => s + Math.max(0, Math.round(r.sec || 0)), 0);
+    const th = Math.floor(totalSec / 3600), tm = Math.floor((totalSec % 3600) / 60);
+    const totalDur = th ? `${th}h ${tm}m` : `${tm}m`;
+    const lines: string[] = [];
+    lines.push(`🤖 Claude Code 그룹 작업 기록 (${perSession.length}개 세션)`);
+    if (grp.name) lines.push(`그룹: ${grp.name}`);
+    lines.push(`총 시간: ${totalDur}`);
+    lines.push("");
+    for (const ps of perSession) {
+      const sec = Math.max(0, Math.round(ps.sec || 0));
+      const sh = Math.floor(sec / 3600), sm = Math.floor((sec % 3600) / 60);
+      const dur = sh ? `${sh}h ${sm}m` : `${sm}m`;
+      const st = stMap[ticket_key]?.[ps.session_id];
+      lines.push(`▸ session ${String(ps.session_id).slice(0, 8)}…  ${dur}  (${ps.n} 세그먼트)`);
+      if (st?.summary) lines.push(`  ${st.summary}`);
+      try {
+        const kc = st?.key_changes ? JSON.parse(st.key_changes) : [];
+        if (kc.length) lines.push("  - " + kc.slice(0, 3).join("\n  - "));
+      } catch {}
+    }
+    lines.push("");
+    lines.push(`그룹 보기: ${new URL(c.req.url).origin}/g/${gid}`);
+    const r = await addComment(conn, ticket_key, lines.join("\n"));
+    if (r.ok && r.id) {
+      await c.env.DB.prepare(`
+        INSERT INTO group_ticket_comments (group_id, ticket_key, jira_comment_id, posted_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(group_id, ticket_key) DO UPDATE SET
+          jira_comment_id = excluded.jira_comment_id,
+          posted_at = excluded.posted_at
+      `).bind(gid, ticket_key, r.id, new Date().toISOString()).run();
+    }
+    results.push({ ticket_key, ok: r.ok, error: r.error, comment_id: r.id, total_duration: totalDur, sessions: perSession.length });
+  }
+  await audit(c.env, actor, "group_writeback", grp.owner_email, gid, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: true, group_id: gid, results });
+});
+
+// Close a group (no further attaches).
+app.post("/api/groups/:gid/close", async (c) => {
+  const actor = c.get("actor");
+  const gid = c.req.param("gid");
+  const grp: any = await c.env.DB.prepare(
+    "SELECT owner_email, team FROM session_groups WHERE id = ?"
+  ).bind(gid).first();
+  if (!grp) return c.json({ error: "group not found" }, 404);
+  if (!canSeeUser(actor, grp.owner_email, grp.team)) return c.json({ error: "forbidden" }, 403);
+  await c.env.DB.prepare(
+    "UPDATE session_groups SET closed_at = ? WHERE id = ?"
+  ).bind(new Date().toISOString(), gid).run();
+  return c.json({ ok: true });
+});
+
+// 세션 종료 시 (또는 /tracker-ticket done) — 각 segment에 대해 jira 코멘트 등록 + 옵션으로 상태 전이
+app.post("/api/sessions/:id/writeback", async (c) => {
+  const actor = c.get("actor");
+  const sid = c.req.param("id");
+  const head: any = await c.env.DB.prepare(
+    "SELECT MAX(user_email) user_email, MAX(team) team FROM events WHERE session_id = ?"
+  ).bind(sid).first();
+  if (!head?.user_email) return c.json({ error: "session not found" }, 404);
+  if (!canSeeUser(actor, head.user_email, head.team)) return c.json({ error: "forbidden" }, 403);
+
+  // ── If this session is in a group, redirect to group writeback so the work
+  //    of all member sessions lands in one combined Jira comment per ticket. ──
+  const grpRow: any = await c.env.DB.prepare(
+    "SELECT group_id FROM session_group_members WHERE session_id = ? LIMIT 1"
+  ).bind(sid).first();
+  if (grpRow?.group_id) {
+    const gurl = new URL(c.req.url);
+    gurl.pathname = `/api/groups/${encodeURIComponent(grpRow.group_id)}/writeback`;
+    const gres = await fetch(gurl.toString(), {
+      method: "POST",
+      headers: { Authorization: c.req.header("authorization") || "", "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const gj: any = await gres.json().catch(() => ({}));
+    return c.json({ ok: gj.ok, sid, group_id: grpRow.group_id, results: gj.results || [], routed_to_group: true });
+  }
+
+  // open segment 강제 종료
+  const now = new Date().toISOString();
+  await c.env.DB.prepare(
+    "UPDATE session_ticket_segments SET ended_at = ?, user_action = COALESCE(user_action, 'end') WHERE session_id = ? AND ended_at IS NULL"
+  ).bind(now, sid).run();
+  await recomputeWeightsFromSegments(c.env, sid);
+  // 분석 (요약 가져오기)
+  const a: any = await c.env.DB.prepare("SELECT summary FROM session_analysis WHERE session_id = ?").bind(sid).first();
+  const sessionSummary = a?.summary || "Claude Code 세션 작업";
+  const stRows = await c.env.DB.prepare(
+    "SELECT ticket_key, summary, key_changes FROM session_tickets WHERE session_id = ?"
+  ).bind(sid).all<any>();
+  const ticketDetail: Record<string, any> = {};
+  for (const r of (stRows.results || []) as any[]) ticketDetail[r.ticket_key] = r;
+  const segs = await c.env.DB.prepare(`
+    SELECT ticket_key,
+           SUM((julianday(COALESCE(ended_at, datetime('now'))) - julianday(started_at)) * 86400) AS sec,
+           MIN(started_at) AS first_started,
+           MAX(COALESCE(ended_at, datetime('now'))) AS last_ended,
+           COUNT(*) AS n
+    FROM session_ticket_segments WHERE session_id = ? GROUP BY ticket_key
+  `).bind(sid).all<any>();
+  const conn = await getJiraConn(c.env, head.user_email);
+  const results: any[] = [];
+  for (const s of (segs.results || []) as any[]) {
+    if (!conn) { results.push({ ticket_key: s.ticket_key, ok: false, error: "no jira" }); continue; }
+    const sec = Math.max(0, Math.round(s.sec || 0));
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+    const dur = h ? `${h}h ${m}m` : `${m}m`;
+    const td = ticketDetail[s.ticket_key];
+    let kc: string[] = [];
+    try { kc = td?.key_changes ? JSON.parse(td.key_changes) : []; } catch {}
+    const text = [
+      `🤖 Claude Code 세션 작업 기록`,
+      td?.summary ? `요약: ${td.summary}` : `요약: ${sessionSummary}`,
+      `시간: ${dur}  (${s.n}개 세그먼트)`,
+      kc.length ? `주요 변경:\n- ${kc.slice(0, 5).join("\n- ")}` : "",
+      `세션 링크: ${new URL(c.req.url).origin}/browse?user=${encodeURIComponent(head.user_email)}&session=${encodeURIComponent(sid)}`,
+    ].filter(Boolean).join("\n");
+    const r = await addComment(conn, s.ticket_key, text);
+    if (r.ok && r.id) {
+      await c.env.DB.prepare(
+        "UPDATE session_ticket_segments SET jira_comment_id = ? WHERE session_id = ? AND ticket_key = ? AND jira_comment_id IS NULL"
+      ).bind(r.id, sid, s.ticket_key).run();
+    }
+    results.push({ ticket_key: s.ticket_key, ok: r.ok, error: r.error, comment_id: r.id, duration: dur });
+  }
+  await audit(c.env, actor, "ticket_writeback", head.user_email, sid, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: true, sid, results });
+});
+
+// ── 세션 시작 시 티켓 추천 (브랜치/커밋 → 후보, 본인 미완료 → 추천) ────
+app.post("/api/sessions/recommendations", async (c) => {
+  const actor = c.get("actor");
+  const body = await c.req.json<any>().catch(() => ({}));
+  const branch = String(body.branch || "");
+  const remote = String(body.remote_url || "");
+  const cwd = String(body.cwd || "");
+  const repoRoot = String(body.repo_root || "") || cwd || null;
+  const sid = body.session_id ? String(body.session_id) : "";
+  const commits: string[] = Array.isArray(body.commits)
+    ? body.commits.filter((x: any) => typeof x === "string").slice(0, 20)
+    : [];
+
+  // ── Persist git context early so /tracker-ticket start can read it. ──
+  // (session_git was previously written only on session_end, which is too late
+  //  for auto-grouping.) Upsert keeps existing fields like commits_json/diff_stat
+  //  written by the stop hook later.
+  if (sid && (remote || branch || repoRoot)) {
+    const nowIso = new Date().toISOString();
+    await c.env.DB.prepare(`
+      INSERT INTO session_git (session_id, repo_root, remote_url, branch, collected_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        repo_root  = COALESCE(excluded.repo_root,  session_git.repo_root),
+        remote_url = COALESCE(excluded.remote_url, session_git.remote_url),
+        branch     = COALESCE(excluded.branch,     session_git.branch),
+        collected_at = excluded.collected_at
+    `).bind(sid, repoRoot || null, remote || null, branch || null, nowIso).run();
+  }
+
+  // ── Auto-attach to existing (user, repo) group if one is open. ──
+  // The orchestrator's prior /tracker-ticket start KEY created the group with
+  // active_ticket_key set; new sessions joining inherit the open ticket and
+  // get their own segment opened automatically.
+  let autoGroup: any = null;
+  if (sid) {
+    try {
+      const alreadyMember: any = await c.env.DB.prepare(
+        "SELECT group_id FROM session_group_members WHERE session_id = ? LIMIT 1"
+      ).bind(sid).first();
+      let group: any = null;
+      if (alreadyMember?.group_id) {
+        group = await c.env.DB.prepare("SELECT * FROM session_groups WHERE id = ?")
+          .bind(alreadyMember.group_id).first<any>();
+      } else {
+        group = await findOpenGroupByRepo(c.env, actor.email, remote || null, repoRoot || null);
+        if (group) await ensureMember(c.env, group.id, sid, "worker");
+      }
+      if (group) {
+        if (group.active_ticket_key) {
+          // Open a segment for this session on the group's active ticket.
+          await openSegmentForSession(c.env, sid, group.active_ticket_key, actor.email, "auto-group-attach");
+        }
+        autoGroup = {
+          id: group.id,
+          name: group.name,
+          active_ticket_key: group.active_ticket_key,
+          auto_attached: !alreadyMember?.group_id,
+        };
+      }
+    } catch { /* best-effort */ }
+  }
+  const KEY_RE = /\b([A-Z][A-Z0-9]{1,9}-\d+)\b/g;
+  const detected = new Map<string, string>();
+  const add = (k: string, ev: string) => { const u = k.toUpperCase(); if (!detected.has(u)) detected.set(u, ev); };
+  for (const m of branch.matchAll(KEY_RE)) add(m[1], `브랜치: ${branch}`);
+  for (const cm of commits) for (const m of cm.matchAll(KEY_RE)) add(m[1], `커밋: ${cm.slice(0, 80)}`);
+
+  const conn = await getJiraConn(c.env, actor.email);
+  let openTickets: any[] = [];
+  if (conn) {
+    try { openTickets = await fetchAssignedOpen(conn, 30); } catch {}
+  }
+  const openByKey = new Map(openTickets.map((t: any) => [t.key, t]));
+
+  // detected 후보 메타 보강
+  const detectedRich: any[] = [];
+  for (const [key, evidence] of detected) {
+    let meta: any = openByKey.get(key);
+    if (!meta && conn) { try { meta = await fetchTicket(conn, key); } catch {} }
+    detectedRich.push({
+      key, evidence,
+      summary: meta?.summary || null,
+      status: meta?.status || null,
+      url: meta?.url || (conn ? `${conn.base_url.replace(/\/$/, "")}/browse/${key}` : null),
+      in_assigned: openByKey.has(key),
+    });
+  }
+
+  // 추천 우선순위: detected ∩ assigned > detected > assigned (top 5)
+  const detectedKeys = new Set(detectedRich.map(d => d.key));
+  const assignedTop = openTickets
+    .filter((t: any) => !detectedKeys.has(t.key))
+    .slice(0, 5)
+    .map((t: any) => ({ key: t.key, summary: t.summary, status: t.status, priority: t.priority, url: t.url }));
+
+  return c.json({
+    has_jira: !!conn,
+    detected: detectedRich,
+    assigned_open: assignedTop,
+    repo: { remote_url: remote || null, branch: branch || null },
+    auto_group: autoGroup,
+    hint: autoGroup?.active_ticket_key
+      ? `자동 그룹 합류: ${autoGroup.name} (활성 티켓: ${autoGroup.active_ticket_key})`
+      : (detectedRich.length
+          ? `감지된 티켓이 있습니다. 시작: /tracker-ticket start ${detectedRich[0].key}`
+          : (assignedTop.length ? "본인 미완료 티켓 중에서 선택해 시작하세요." : "관련 티켓이 감지되지 않았습니다.")),
+  });
+});
+
+// ── Wiki sync (살아있는 티켓 노트, A1) ────────────────────────────────
+// 세션의 segments + analysis + git context를 Confluence 위키 페이지에 누적.
+// 페이지 없으면 생성, 있으면 작업 이력 섹션에 신규 항목을 prepend(최신 위).
+app.post("/api/sessions/:id/wiki-sync", async (c) => {
+  const actor = c.get("actor");
+  const sid = c.req.param("id");
+  const head: any = await c.env.DB.prepare(
+    "SELECT MAX(user_email) user_email, MAX(team) team FROM events WHERE session_id = ?"
+  ).bind(sid).first();
+  const owner = head?.user_email || actor.email;
+  if (!canSeeUser(actor, owner, head?.team)) return c.json({ error: "forbidden" }, 403);
+  const conn = await getJiraConn(c.env, owner);
+  if (!conn) return c.json({ error: "no jira/confluence integration on session owner" }, 503);
+  // space_key 우선순위: body.space_key → owner의 tokens.confluence_space (선택) → personal space 자동 감지
+  const reqBody = await c.req.json<any>().catch(() => ({}));
+  let spaceKey: string | null = (reqBody && typeof reqBody.space_key === "string" && reqBody.space_key.trim()) || null;
+  if (!spaceKey) {
+    const pref: any = await c.env.DB.prepare(
+      "SELECT meta_json FROM user_integrations WHERE user_email = ? AND kind = 'jira'"
+    ).bind(owner).first();
+    try {
+      const meta = pref?.meta_json ? JSON.parse(pref.meta_json) : {};
+      if (meta.confluence_space_key) spaceKey = String(meta.confluence_space_key);
+    } catch {}
+  }
+  if (!spaceKey) spaceKey = await getPersonalSpaceKey(conn);
+  if (!spaceKey) return c.json({ error: "no personal Confluence space accessible" }, 503);
+
+  // 세션의 티켓 + 요약 + key_changes
+  const stRows = await c.env.DB.prepare(
+    "SELECT ticket_key, summary, key_changes FROM session_tickets WHERE session_id = ? ORDER BY rank ASC"
+  ).bind(sid).all<any>();
+  const tickets = (stRows.results || []) as any[];
+  if (!tickets.length) return c.json({ ok: true, sid, skipped: "no tickets linked", results: [] });
+
+  // 분석/git 메타
+  const analysis: any = await c.env.DB.prepare(
+    "SELECT summary, key_changes, category FROM session_analysis WHERE session_id = ?"
+  ).bind(sid).first();
+  const git: any = await c.env.DB.prepare(
+    "SELECT branch, diff_stat, commits_json FROM session_git WHERE session_id = ?"
+  ).bind(sid).first();
+
+  // segment 시간 (티켓별)
+  const segs = await c.env.DB.prepare(`
+    SELECT ticket_key,
+           SUM((julianday(COALESCE(ended_at, datetime('now'))) - julianday(started_at)) * 86400) AS sec
+    FROM session_ticket_segments WHERE session_id = ? GROUP BY ticket_key
+  `).bind(sid).all<any>();
+  const durByKey = new Map<string, number>();
+  for (const s of (segs.results || []) as any[]) durByKey.set(s.ticket_key, Math.max(0, Math.round(s.sec || 0)));
+
+  // 작성자 표기 (owner의 이름)
+  const ownerRow: any = await c.env.DB.prepare(
+    "SELECT MAX(user_name) name FROM tokens WHERE user_email = ?"
+  ).bind(owner).first();
+  const authorName = ownerRow?.name || owner;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const sessionUrl = `${new URL(c.req.url).origin}/browse?user=${encodeURIComponent(owner)}&session=${encodeURIComponent(sid)}`;
+  const HISTORY_MARKER = "<!-- WORK_HISTORY -->";
+
+  const results: any[] = [];
+  for (const t of tickets) {
+    const tk = t.ticket_key;
+    let kc: string[] = [];
+    try { kc = t.key_changes ? JSON.parse(t.key_changes) : []; } catch {}
+    if (!kc.length && analysis?.key_changes) {
+      try { kc = JSON.parse(analysis.key_changes); } catch {}
+    }
+    const summary = t.summary || analysis?.summary || "(요약 없음)";
+    const sec = durByKey.get(tk) || 0;
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+    const dur = sec > 0 ? (h ? `${h}h ${m}m` : `${m}m`) : null;
+
+    const newSection = `
+      <h3>${today} · ${escapeXml(authorName)}${dur ? ` · ${dur}` : ""}${analysis?.category ? ` · <em>${escapeXml(analysis.category)}</em>` : ""}</h3>
+      <p><strong>한 일:</strong> ${escapeXml(summary)}</p>
+      ${kc.length ? `<ul>${kc.map(k => `<li>${escapeXml(k)}</li>`).join("")}</ul>` : ""}
+      ${git?.diff_stat ? `<p><strong>변경:</strong> <code>${escapeXml(git.diff_stat)}</code>${git.branch ? ` · 브랜치 <code>${escapeXml(git.branch)}</code>` : ""}</p>` : ""}
+      <p><strong>세션:</strong> <a href="${sessionUrl}">세션 열기</a></p>
+    `.trim();
+
+    // 부모 티켓(주로 Epic)이 있으면 그 페이지를 보장하고 자식으로 매달기.
+    // type이 'Epic' 또는 '에픽'이거나 parent가 있으면 무조건 nest — Jira 계층 그대로 반영.
+    const ticketMeta = await fetchTicket(conn, tk);
+    let parentPageId: string | undefined;
+    if (ticketMeta?.parent_key) {
+      const parentJiraUrl = `${conn.base_url.replace(/\/$/, "")}/browse/${ticketMeta.parent_key}`;
+      const ep = await ensureEpicPage(
+        conn, spaceKey, ticketMeta.parent_key,
+        ticketMeta.parent_summary || "",
+        parentJiraUrl,
+      );
+      if (ep.id) parentPageId = ep.id;
+    }
+
+    // 기존 페이지 있으면 갱신, 없으면 생성
+    const existing = await findTicketWikiPage(conn, spaceKey, tk);
+    if (existing) {
+      let body: string = existing.body || "";
+      if (body.includes(HISTORY_MARKER)) {
+        body = body.replace(HISTORY_MARKER, HISTORY_MARKER + "\n" + newSection);
+      } else {
+        // 마커 없는 기존 페이지(예: 시드된 정적 페이지) → 작업 이력 섹션 신규 추가
+        body = body + `\n<h2>📅 작업 이력</h2>\n<p style="font-size:11px;color:#888">최신 작업이 위에 추가됩니다.</p>\n${HISTORY_MARKER}\n` + newSection;
+      }
+      const upd = await updateConfluencePageBody(conn, existing.id, existing.title, existing.version, body, parentPageId);
+      results.push({ ticket_key: tk, page_url: existing.url, action: "updated", ok: upd.ok, error: upd.error || null });
+    } else {
+      // 생성
+      const ticketSummary = ticketMeta?.summary || "";
+      const initialBody = `
+        <h1>${escapeXml(ticketSummary || tk)}</h1>
+        <p><em>${escapeXml(tk)} 작업 노트 · 자동 갱신됨</em></p>
+        <h2>📌 개요</h2>
+        <p>${escapeXml(ticketSummary || "(요약 없음)")}</p>
+        ${ticketMeta?.url ? `<p><a href="${ticketMeta.url}">${tk} (Jira)</a></p>` : ""}
+        <h2>📅 작업 이력</h2>
+        <p style="font-size:11px;color:#888">최신 작업이 위에 추가됩니다.</p>
+        ${HISTORY_MARKER}
+        ${newSection}
+      `.trim();
+      const title = `${tk} 작업 노트${ticketSummary ? " — " + ticketSummary.slice(0, 60) : ""}`;
+      const created = await createConfluencePage(conn, spaceKey, title, initialBody, parentPageId);
+      if (created.ok && created.url) {
+        await addJiraRemoteLink(conn, tk, created.url, title);
+      }
+      results.push({ ticket_key: tk, page_url: created.url || null, action: "created", ok: created.ok, error: created.error || null });
+    }
+  }
+  await audit(c.env, actor, "wiki_sync", owner, sid, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: true, sid, space_key: spaceKey, results });
+});
+
+// ── Manual ticket linking ────────────────────────────────────────────────
+// 사람이 LLM 분석 결과를 보정. source='manual' 행은 다음 분석 때 보존됨.
+async function rebalanceWeights(env: Env, sid: string) {
+  // 모든 링크의 weight 합을 1로 정규화 (manual 우선 가중치 유지하되 균등 폴백)
+  const r = await env.DB.prepare("SELECT ticket_key, weight FROM session_tickets WHERE session_id = ?").bind(sid).all<any>();
+  const rows = (r.results || []) as any[];
+  if (!rows.length) return;
+  const sum = rows.reduce((s, x) => s + (x.weight || 0), 0);
+  if (sum > 0 && Math.abs(sum - 1) < 0.01) return;
+  const eq = 1 / rows.length;
+  for (const x of rows) {
+    const w = sum > 0 ? (x.weight || 0) / sum : eq;
+    await env.DB.prepare("UPDATE session_tickets SET weight = ? WHERE session_id = ? AND ticket_key = ?")
+      .bind(w, sid, x.ticket_key).run();
+  }
+}
+
+app.post("/api/sessions/:id/tickets", async (c) => {
+  const actor = c.get("actor");
+  const sid = c.req.param("id");
+  const head: any = await c.env.DB.prepare(
+    "SELECT MAX(user_email) user_email, MAX(team) team FROM events WHERE session_id = ?"
+  ).bind(sid).first();
+  if (!head?.user_email) return c.json({ error: "session not found" }, 404);
+  if (!canSeeUser(actor, head.user_email, head.team)) return c.json({ error: "forbidden" }, 403);
+  const body = await c.req.json<any>().catch(() => ({}));
+  const rawKey = String(body.ticket_key || "").trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9]{1,9}-\d+$/.test(rawKey)) return c.json({ error: "invalid ticket key (expected ABC-123)" }, 400);
+  const conf = typeof body.confidence === "number" ? body.confidence : 1.0;
+  const now = new Date().toISOString();
+  // 다음 rank
+  const maxR: any = await c.env.DB.prepare("SELECT COALESCE(MAX(rank), -1) AS r FROM session_tickets WHERE session_id = ?").bind(sid).first();
+  const rank = (maxR?.r ?? -1) + 1;
+  await c.env.DB.prepare(`
+    INSERT INTO session_tickets (session_id, ticket_key, rank, confidence, evidence, source, weight, created_by, created_at)
+    VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?)
+    ON CONFLICT(session_id, ticket_key) DO UPDATE SET
+      source='manual', confidence=excluded.confidence, evidence=excluded.evidence,
+      created_by=excluded.created_by, created_at=excluded.created_at
+  `).bind(sid, rawKey, rank, conf, `manual:${actor.email}`, 0, actor.email, now).run();
+  await rebalanceWeights(c.env, sid);
+  // 티켓 메타도 actor의 jira로 캐시 (있으면)
+  const conn = await getJiraConn(c.env, actor.email);
+  if (conn) {
+    const t = await fetchTicket(conn, rawKey);
+    if (t) {
+      await c.env.DB.prepare(`
+        INSERT INTO jira_tickets (key, user_email, team, summary, status, assignee_email, url, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(key, user_email) DO UPDATE SET
+          team=excluded.team, summary=excluded.summary, status=excluded.status,
+          assignee_email=excluded.assignee_email, url=excluded.url, fetched_at=excluded.fetched_at
+      `).bind(t.key, head.user_email, head.team || null, t.summary, t.status, t.assignee_email, t.url, now).run();
+    }
+  }
+  await audit(c.env, actor, "session_ticket_add", head.user_email, sid, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: true, session_id: sid, ticket_key: rawKey });
+});
+
+app.delete("/api/sessions/:id/tickets/:key", async (c) => {
+  const actor = c.get("actor");
+  const sid = c.req.param("id");
+  const key = c.req.param("key").toUpperCase();
+  const head: any = await c.env.DB.prepare(
+    "SELECT MAX(user_email) user_email, MAX(team) team FROM events WHERE session_id = ?"
+  ).bind(sid).first();
+  if (!head?.user_email) return c.json({ error: "session not found" }, 404);
+  if (!canSeeUser(actor, head.user_email, head.team)) return c.json({ error: "forbidden" }, 403);
+  const r = await c.env.DB.prepare("DELETE FROM session_tickets WHERE session_id = ? AND ticket_key = ?")
+    .bind(sid, key).run();
+  await rebalanceWeights(c.env, sid);
+  await audit(c.env, actor, "session_ticket_remove", head.user_email, sid, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: true, removed: (r as any).meta?.changes || 0 });
 });
 
 // "오늘의 작업" — 사용자가 최근 N일 내 분석된 세션을 티켓별로 그룹
@@ -962,13 +2146,17 @@ app.get("/api/users/:email/work", async (c) => {
   if (!canSeeUser(actor, email, target?.team)) return c.json({ error: "forbidden" }, 403);
   const days = Math.max(1, parseInt(c.req.query("days") || "1", 10));
   const since = new Date(Date.now() - days * 86400_000).toISOString();
+  const targetTeam = target?.team || "";
+  // 한 세션이 여러 티켓에 걸치면 N행 반환 — weight로 비용 분배
   const rows = await c.env.DB.prepare(`
-    SELECT a.session_id, a.ticket_key, a.summary, a.category, a.key_changes,
+    SELECT a.session_id, st.ticket_key, st.confidence, st.weight, st.source,
+           a.summary, a.category, a.key_changes,
            t.summary AS ticket_summary, t.status AS ticket_status, t.url AS ticket_url,
            e.started, e.last_event, e.events,
            e.input_tokens, e.output_tokens, e.cache_read_tokens, e.cache_create_tokens, e.model
     FROM session_analysis a
-    LEFT JOIN jira_tickets t ON t.key = a.ticket_key AND t.user_email = ?
+    LEFT JOIN session_tickets st ON st.session_id = a.session_id
+    LEFT JOIN jira_tickets t ON t.key = st.ticket_key AND (t.user_email = ? OR t.team = ?)
     LEFT JOIN (
       SELECT session_id, MAX(model) model,
              MIN(ts) started, MAX(ts) last_event, COUNT(*) events,
@@ -978,9 +2166,20 @@ app.get("/api/users/:email/work", async (c) => {
     ) e ON e.session_id = a.session_id
     WHERE a.analyzed_at >= ?
     AND a.session_id IN (SELECT DISTINCT session_id FROM events WHERE user_email = ?)
-    ORDER BY e.last_event DESC
-  `).bind(email, since, email).all<any>();
-  const out = (rows.results || []).map((r: any) => ({ ...r, cost_usd: costUsd(r) }));
+    ORDER BY e.last_event DESC, st.rank ASC
+  `).bind(email, targetTeam, since, email).all<any>();
+  // weight 기준 비용 분배. ticket이 없는(분석됐지만 매칭 0) 세션은 ticket_key=null 한 행으로 1.0
+  const seen = new Set<string>();
+  const out = (rows.results || []).map((r: any) => {
+    const w = r.weight ?? 1.0;
+    const fullCost = costUsd(r);
+    return { ...r, cost_usd: fullCost * w, full_cost_usd: fullCost };
+  }).filter((r: any) => {
+    if (r.ticket_key) return true;
+    // ticket이 없는 세션 한 번만
+    if (seen.has(r.session_id)) return false;
+    seen.add(r.session_id); return true;
+  });
   return c.json(out);
 });
 
@@ -1057,39 +2256,79 @@ app.get("/api/projects/:slug/summary", async (c) => {
   const since = new Date(Date.now() - days * 86400_000).toISOString();
   // 같은 slug를 가진 remote_url 매칭
   const remoteLike = `%${slug}%`;
+  // 세션 단위 메타 (티켓 무관)
   const sessions = await c.env.DB.prepare(`
     SELECT g.session_id, g.branch, g.remote_url, g.diff_stat,
-           e.user_email, MIN(e.ts) started, MAX(e.ts) last_event,
+           e.user_email, e.team, MIN(e.ts) started, MAX(e.ts) last_event,
            COUNT(*) events,
            SUM(e.input_tokens) input_tokens, SUM(e.output_tokens) output_tokens,
            SUM(e.cache_read_tokens) cache_read_tokens, SUM(e.cache_create_tokens) cache_create_tokens,
-           a.ticket_key, a.summary AS analysis_summary, a.category,
-           t.summary AS ticket_summary, t.status AS ticket_status, t.url AS ticket_url
+           a.summary AS analysis_summary, a.category
     FROM session_git g
     JOIN events e ON e.session_id = g.session_id
     LEFT JOIN session_analysis a ON a.session_id = g.session_id
-    LEFT JOIN jira_tickets t ON t.key = a.ticket_key AND t.user_email = e.user_email
     WHERE g.remote_url LIKE ? AND e.ts >= ?
     GROUP BY g.session_id ORDER BY last_event DESC LIMIT 200
   `).bind(remoteLike, since).all<any>();
-
-  // 사용자 본인이 admin/manager 아니면 자기 데이터로 한정
+  // 권한 필터
   const filtered = (sessions.results || []).filter((s: any) => isAdmin(actor) ||
     (actor.role === "manager" && s.team === actor.team) ||
     s.user_email === actor.email);
-
-  // 티켓별 그룹
-  const byTicket: Record<string, any> = {};
   let totalCost = 0;
-  for (const s of filtered) {
-    s.cost_usd = costUsd(s); totalCost += s.cost_usd;
-    const k = s.ticket_key || "(미연결)";
-    byTicket[k] = byTicket[k] || { ticket_key: s.ticket_key, ticket_summary: s.ticket_summary, ticket_status: s.ticket_status, ticket_url: s.ticket_url, sessions: [], cost_usd: 0, users: new Set() };
-    byTicket[k].sessions.push(s);
-    byTicket[k].cost_usd += s.cost_usd;
-    byTicket[k].users.add(s.user_email);
+  for (const s of filtered) { s.cost_usd = costUsd(s); totalCost += s.cost_usd; }
+
+  // 세션-티켓 링크 + 티켓 메타 (배치)
+  const sids = filtered.map((s: any) => s.session_id);
+  const linkMap = new Map<string, { key: string; weight: number; confidence: number; source: string }[]>();
+  if (sids.length) {
+    const ph = sids.map(() => "?").join(",");
+    const lr = await c.env.DB.prepare(
+      `SELECT session_id, ticket_key, weight, confidence, source FROM session_tickets WHERE session_id IN (${ph}) ORDER BY rank ASC`
+    ).bind(...sids).all<any>();
+    for (const r of (lr.results || [])) {
+      const arr = linkMap.get(r.session_id) || [];
+      arr.push({ key: r.ticket_key, weight: r.weight ?? 1, confidence: r.confidence ?? 0, source: r.source });
+      linkMap.set(r.session_id, arr);
+    }
   }
-  const tickets = Object.values(byTicket).map((t: any) => ({ ...t, users: [...t.users] }));
+  const allKeys = Array.from(new Set([...linkMap.values()].flat().map(x => x.key)));
+  const metaByKey: Record<string, any> = {};
+  if (allKeys.length) {
+    const ph = allKeys.map(() => "?").join(",");
+    const tr = await c.env.DB.prepare(
+      `SELECT key, MAX(summary) summary, MAX(status) status, MAX(url) url FROM jira_tickets WHERE key IN (${ph}) GROUP BY key`
+    ).bind(...allKeys).all<any>();
+    for (const t of (tr.results || [])) metaByKey[t.key] = t;
+  }
+
+  // 티켓별 집계 (weight로 비용 분배)
+  const byTicket: Record<string, any> = {};
+  for (const s of filtered) {
+    const links = linkMap.get(s.session_id) || [];
+    if (!links.length) {
+      const k = "(미연결)";
+      byTicket[k] = byTicket[k] || { ticket_key: null, ticket_summary: null, ticket_status: null, ticket_url: null, sessions: [], cost_usd: 0, users: new Set() };
+      byTicket[k].sessions.push(s);
+      byTicket[k].cost_usd += s.cost_usd;
+      byTicket[k].users.add(s.user_email);
+      continue;
+    }
+    for (const l of links) {
+      const k = l.key;
+      const meta = metaByKey[k] || {};
+      byTicket[k] = byTicket[k] || { ticket_key: k, ticket_summary: meta.summary || null, ticket_status: meta.status || null, ticket_url: meta.url || null, sessions: [], cost_usd: 0, users: new Set(), avg_confidence: 0, _confSum: 0, _confN: 0 };
+      byTicket[k].sessions.push({ ...s, weight: l.weight, confidence: l.confidence, source: l.source });
+      byTicket[k].cost_usd += s.cost_usd * l.weight;
+      byTicket[k].users.add(s.user_email);
+      byTicket[k]._confSum += l.confidence; byTicket[k]._confN += 1;
+    }
+  }
+  const tickets = Object.values(byTicket).map((t: any) => ({
+    ...t,
+    users: [...t.users],
+    avg_confidence: t._confN ? +(t._confSum / t._confN).toFixed(2) : null,
+    _confSum: undefined, _confN: undefined,
+  }));
 
   // 막힌 티켓 (커밋 0이고 30분+ 시간 들임)
   const stuck = tickets.filter((t: any) => {
@@ -1112,15 +2351,19 @@ app.get("/api/projects/:slug/summary", async (c) => {
 async function dailyForMembers(env: Env, members: { email: string; name: string | null; team: string | null; plan?: string | null }[], dayStart: string, dayEnd: string) {
   const out: any[] = [];
   for (const m of members) {
-    // 미완료 티켓 (jira_tickets — 사용자가 jira 연동 시 캐시됨)
+    // 미완료 티켓 (jira_tickets — user_email 우선, 같은 team 폴백)
     const tickets = await env.DB.prepare(`
-      SELECT key, summary, status, url FROM jira_tickets
-      WHERE user_email = ? AND (status IS NULL OR LOWER(status) NOT IN ('done','closed','완료','resolved'))
+      SELECT key, MAX(summary) summary, MAX(status) status, MAX(url) url, MAX(fetched_at) fetched_at
+      FROM jira_tickets
+      WHERE (user_email = ? OR team = ?)
+        AND (status IS NULL OR LOWER(status) NOT IN ('done','closed','완료','resolved'))
+      GROUP BY key
       ORDER BY fetched_at DESC LIMIT 20
-    `).bind(m.email).all<any>();
-    // 그날 한 일 — 분석된 세션 (해당 사용자의 세션이며 그 날짜에 활동)
+    `).bind(m.email, m.team || "").all<any>();
+    // 그날 한 일 — 분석된 세션을 (session, ticket) 단위로 펼쳐서 weight 적용
     const done = await env.DB.prepare(`
-      SELECT a.session_id, a.ticket_key, a.summary, a.category,
+      SELECT a.session_id, st.ticket_key, st.weight, st.confidence, st.source,
+             a.summary, a.category,
              t.summary AS ticket_summary, t.url AS ticket_url,
              MIN(e.ts) started, MAX(e.ts) last_event,
              SUM(e.input_tokens) input_tokens, SUM(e.output_tokens) output_tokens,
@@ -1128,10 +2371,12 @@ async function dailyForMembers(env: Env, members: { email: string; name: string 
              MAX(e.model) model
       FROM events e
       JOIN session_analysis a ON a.session_id = e.session_id
-      LEFT JOIN jira_tickets t ON t.key = a.ticket_key AND t.user_email = ?
+      LEFT JOIN session_tickets st ON st.session_id = a.session_id
+      LEFT JOIN jira_tickets t ON t.key = st.ticket_key AND (t.user_email = ? OR t.team = ?)
       WHERE e.user_email = ? AND e.ts >= ? AND e.ts < ?
-      GROUP BY a.session_id ORDER BY last_event DESC
-    `).bind(m.email, m.email, dayStart, dayEnd).all<any>();
+      GROUP BY a.session_id, st.ticket_key
+      ORDER BY last_event DESC, st.rank ASC
+    `).bind(m.email, m.team || "", m.email, dayStart, dayEnd).all<any>();
     // 그날의 raw 활동 통계 (분석 안 된 세션도 포함)
     const stats: any = await env.DB.prepare(`
       SELECT COUNT(DISTINCT session_id) sessions, COUNT(*) events,
@@ -1140,10 +2385,49 @@ async function dailyForMembers(env: Env, members: { email: string; name: string 
              MAX(model) model
       FROM events WHERE user_email = ? AND ts >= ? AND ts < ?
     `).bind(m.email, dayStart, dayEnd).first();
+    // weight로 비용 분배. 티켓 없는 세션은 한 번만 출력 (ticket_key=null, weight=1)
+    const seenSid = new Set<string>();
+    const doneRows = (done.results || []).map((d: any) => {
+      const w = d.weight ?? 1.0;
+      return { ...d, weight: w, cost_usd: costUsd(d) * w, full_cost_usd: costUsd(d) };
+    }).filter((d: any) => {
+      if (d.ticket_key) return true;
+      if (seenSid.has(d.session_id)) return false;
+      seenSid.add(d.session_id); return true;
+    });
+
+    // ── 3-bucket 분류: todo / doing / done ─────────────────────────────
+    // todo  = 미완료 jira 티켓 中 오늘 세션 없음
+    // doing = 미완료 jira 티켓 中 오늘 세션 있음 (메타 + 오늘 세션들 묶음)
+    // done  = 오늘 분석된 세션 中 (a) 티켓 없음 또는 (b) 티켓이 jira 미완료 목록에 없음 (=완료된 티켓이거나 캐시 누락)
+    const openByKey = new Map<string, any>();
+    for (const t of (tickets.results || []) as any[]) openByKey.set(t.key, t);
+    const todaysByKey = new Map<string, any[]>();
+    for (const d of doneRows) {
+      if (!d.ticket_key) continue;
+      const arr = todaysByKey.get(d.ticket_key) || [];
+      arr.push(d); todaysByKey.set(d.ticket_key, arr);
+    }
+    const doing: any[] = [];
+    for (const [key, sessions] of todaysByKey) {
+      const meta = openByKey.get(key);
+      if (!meta) continue;  // 미완료 목록에 없으면 done으로 흘림
+      const cost = sessions.reduce((s, x) => s + (x.cost_usd || 0), 0);
+      const dur = sessions.reduce((s, x) => {
+        const d = (new Date(x.last_event).getTime() - new Date(x.started).getTime()) / 1000;
+        return s + (d > 0 && d < 86400 ? Math.min(d, 14400) : 0);
+      }, 0);
+      doing.push({ ...meta, sessions, cost_usd: cost, duration_sec: Math.round(dur) });
+      openByKey.delete(key);  // doing으로 옮긴 키는 todo에서 제거
+    }
+    const todoOnly = Array.from(openByKey.values());
+    const doneOnly = doneRows.filter((d: any) => !d.ticket_key || !todaysByKey.has(d.ticket_key) || !doing.some(x => x.key === d.ticket_key));
+
     out.push({
       email: m.email, name: m.name, team: m.team, plan: m.plan || null,
-      todo: (tickets.results || []),
-      done: (done.results || []).map((d: any) => ({ ...d, cost_usd: costUsd(d) })),
+      todo: todoOnly,
+      doing,
+      done: doneOnly,
       stats: { ...stats, cost_usd: costUsd(stats || {}) },
     });
   }
@@ -1207,6 +2491,22 @@ app.get("/api/teams/:team/daily", async (c) => {
   const members = (mem.results || []) as any[];
   const rows = await dailyForMembers(c.env, members, b.start, b.end);
   return c.json({ date: b.label, team, members: rows });
+});
+
+// 단일 사용자 일일 보드 (본인 또는 admin/manager 가시 범위)
+app.get("/api/users/:email/daily", async (c) => {
+  const actor = c.get("actor");
+  const email = c.req.param("email");
+  const target: any = await c.env.DB.prepare(
+    "SELECT MAX(team) team, MAX(user_name) name FROM tokens WHERE user_email = ? AND revoked_at IS NULL"
+  ).bind(email).first();
+  if (!canSeeUser(actor, email, target?.team)) return c.json({ error: "forbidden" }, 403);
+  const planRow: any = await c.env.DB.prepare(
+    "SELECT plan FROM tokens WHERE user_email = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1"
+  ).bind(email).first();
+  const b = dayBounds(c.req.query("date") || "");
+  const rows = await dailyForMembers(c.env, [{ email, name: target?.name || null, team: target?.team || null, plan: planRow?.plan || null }], b.start, b.end);
+  return c.json({ date: b.label, member: rows[0] || null });
 });
 
 app.get("/api/admin/daily", async (c) => {
@@ -1339,6 +2639,16 @@ ask() {
   printf "%s" "\${var:-\$def}"
 }
 
+ask_secret() {
+  local prompt="\$1" var
+  printf "\\033[1m%s\\033[0m " "\$prompt" >&3
+  stty -echo <&3 2>/dev/null || true
+  IFS= read -r var <&3 || var=""
+  stty echo <&3 2>/dev/null || true
+  printf "\\n" >&3
+  printf "%s" "\$var"
+}
+
 DEFAULT_EMAIL="\$(git config --global user.email 2>/dev/null || echo '')"
 DEFAULT_NAME="\$(git config --global user.name 2>/dev/null || echo '')"
 DEFAULT_TEAM="\${TEAM:-AX}"
@@ -1395,7 +2705,35 @@ else
   red "❌ 토큰 검증 실패: \$ME"; exit 1
 fi
 
-# 4) (선택) 백필
+# 4) (선택) Jira 연결
+echo
+bold "🎟  Jira 연결 (선택)"
+echo "세션을 Jira 티켓에 자동 매칭하고 작업 요약을 댓글로 자동 작성합니다."
+echo "토큰 발급: https://id.atlassian.com/manage-profile/security/api-tokens"
+echo "(나중에 Claude Code 안에서 /tracker-jira set ... 으로도 가능. 건너뛰려면 Enter)"
+echo
+JIRA_URL="\$(ask 'Jira base URL (예: https://aptner.atlassian.net)' '')"
+if [ -n "\$JIRA_URL" ]; then
+  JIRA_EMAIL="\$(ask 'Jira 계정 email' "\$EMAIL")"
+  JIRA_TOKEN="\$(ask_secret 'Jira API 토큰:')"
+  if [ -n "\$JIRA_TOKEN" ]; then
+    bold "🔎 Jira 자격증명 검증·저장 중..."
+    JIRA_BODY="{\\"base_url\\":\\"\$JIRA_URL\\",\\"email\\":\\"\$JIRA_EMAIL\\",\\"token\\":\\"\$JIRA_TOKEN\\"}"
+    JIRA_RESP=\$(curl -s -X POST -H "Authorization: Bearer \$TOKEN" -H "Content-Type: application/json" -d "\$JIRA_BODY" "\$BASE/api/integrations/jira")
+    if echo "\$JIRA_RESP" | grep -q '"ok":true'; then
+      DISPLAY_NAME=\$(echo "\$JIRA_RESP" | sed -n 's/.*"displayName":"\\([^"]*\\)".*/\\1/p')
+      PROJECTS=\$(echo "\$JIRA_RESP"   | sed -n 's/.*"projectsCount":\\([0-9]*\\).*/\\1/p')
+      green "✅ Jira 연결: \${DISPLAY_NAME:-?} · \${PROJECTS:-?} projects"
+      mkdir -p "\$HOME/.claude" && date -u +%FT%TZ > "\$HOME/.claude/.tracker-jira-nudged"
+    else
+      red "❌ Jira 연결 실패: \$JIRA_RESP"
+      echo "   Claude Code 안에서 다시 시도: /tracker-jira set --url=... --email=... --token=..."
+    fi
+    unset JIRA_TOKEN JIRA_BODY JIRA_RESP
+  fi
+fi
+
+# 5) (선택) 백필
 echo
 echo "지난 Claude Code 대화 기록을 지금 가져오면 5~30분 걸릴 수 있습니다."
 echo "(나중에 \`bash \$PLUGIN_DIR/scripts/backfill.js\`로 따로 돌려도 됩니다)"

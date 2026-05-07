@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>duse-ai-plugin · 그룹</title>
+<style>
+  :root { color-scheme: light; --bg:#f8fafc; --panel:#fff; --line:#e2e8f0; --fg:#0f172a; --mute:#475569; --accent:#c2410c; --accent-soft:#fed7aa; --good:#059669; --bad:#dc2626; }
+  *{box-sizing:border-box} html,body{margin:0;padding:0}
+  body{font:13.5px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro","Pretendard",Inter,system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+  header{display:flex;align-items:center;gap:14px;padding:16px 28px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{margin:0;font-size:14px;font-weight:600}
+  header .grow{flex:1}
+  header a.btn,header button{background:#f8fafc;border:1px solid var(--line);color:var(--fg);padding:6px 12px;border-radius:8px;font-size:12.5px;text-decoration:none;cursor:pointer}
+  header a.btn:hover,header button:hover{background:#f1f5f9}
+  main{padding:28px;max-width:1280px;margin:0 auto}
+  .head{display:flex;align-items:flex-end;gap:24px;margin-bottom:24px;flex-wrap:wrap}
+  .head .name{font-size:22px;font-weight:700}
+  .head .gid{font-family:ui-monospace,monospace;font-size:12px;color:var(--mute);margin-top:4px}
+  .head .meta{color:var(--mute);font-size:13px}
+  .pill{display:inline-block;background:#f1f5f9;color:var(--mute);padding:2px 10px;border-radius:12px;font-size:11px}
+  .pill.closed{background:#fee2e2;color:var(--bad)}
+  .pill.open{background:#dcfce7;color:var(--good)}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
+  .kpi .label{font-size:11px;color:var(--mute);text-transform:uppercase;letter-spacing:.06em}
+  .kpi .num{font-size:28px;font-weight:700;margin-top:6px;font-variant-numeric:tabular-nums}
+  .section{margin-bottom:32px}
+  .section h2{font-size:14px;font-weight:600;margin:0 0 14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:0;overflow:hidden}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{padding:10px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+  th{background:#f8fafc;font-weight:600;color:var(--mute);font-size:11.5px;text-transform:uppercase;letter-spacing:.04em}
+  td.mono{font-family:ui-monospace,monospace;font-size:11.5px}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  td a{color:var(--accent);text-decoration:none}
+  td a:hover{text-decoration:underline}
+  .role-pill{display:inline-block;padding:2px 8px;border-radius:8px;font-size:10.5px;font-weight:600}
+  .role-orchestrator{background:#fed7aa;color:#9a3412}
+  .role-worker{background:#dbeafe;color:#1e40af}
+  .empty{padding:32px;text-align:center;color:var(--mute);font-size:13px}
+  .err{margin:40px 28px;padding:20px;background:#fee2e2;color:var(--bad);border-radius:10px}
+  .actions{display:flex;gap:8px;margin-bottom:14px}
+  .actions input{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:7px 12px;font:inherit;font-size:12.5px;font-family:ui-monospace,monospace}
+  .actions button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🧩 그룹</h1>
+  <div class="grow"></div>
+  <a id="dashLink" class="btn" href="/">대시보드</a>
+  <button id="logout">로그아웃</button>
+</header>
+<main id="main"><div class="empty">로딩…</div></main>
+
+<script>
+const TOKEN_KEY = "claude-tracker-token";
+function getTok(){
+  const u = new URL(location.href);
+  const fromUrl = u.searchParams.get("token");
+  if (fromUrl) { localStorage.setItem(TOKEN_KEY, fromUrl); u.searchParams.delete("token"); history.replaceState({}, "", u.toString()); return fromUrl; }
+  return localStorage.getItem(TOKEN_KEY) || "";
+}
+function gid(){ const m = location.pathname.match(/\/g\/([^/?#]+)/); return m ? decodeURIComponent(m[1]) : ""; }
+async function api(path, opts={}){
+  const tok = getTok();
+  const r = await fetch(path, { ...opts, headers: { ...(opts.headers||{}), Authorization: "Bearer " + tok, "Content-Type": "application/json" } });
+  if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || ("HTTP " + r.status));
+  return r.json();
+}
+function fmtDur(sec){
+  sec = Math.max(0, Math.round(sec || 0));
+  const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60);
+  return h ? `${h}h ${m}m` : `${m}m`;
+}
+function fmtTokens(n){
+  n = n || 0;
+  if (n > 1e6) return (n/1e6).toFixed(1) + "M";
+  if (n > 1e3) return (n/1e3).toFixed(1) + "K";
+  return String(n);
+}
+function shortSid(s){ return s.length > 12 ? s.slice(0,8)+"…"+s.slice(-4) : s; }
+function fmtTs(s){ if(!s) return "-"; return s.replace("T"," ").replace(/\..+$/,"").slice(0,16); }
+function escapeHtml(s){ return String(s||"").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
+
+function render(grp){
+  const main = document.getElementById("main");
+  const tok = getTok();
+  document.getElementById("dashLink").href = "/?token=" + encodeURIComponent(tok);
+  const totalTokens = (grp.members || []).reduce((s,m) => s + (m.tokens||0), 0);
+  const totalEvents = (grp.members || []).reduce((s,m) => s + (m.events||0), 0);
+  const totalSec = (grp.tickets || []).reduce((s,t) => s + (t.sec||0), 0);
+  const closed = !!grp.closed_at;
+  main.innerHTML = `
+    <div class="head">
+      <div>
+        <div class="name">${escapeHtml(grp.name || "(이름 없음)")}</div>
+        <div class="gid">${escapeHtml(grp.id)}</div>
+        <div class="meta" style="margin-top:6px">
+          owner: ${escapeHtml(grp.owner_email)}${grp.team ? " · " + escapeHtml(grp.team) : ""}
+          · 생성: ${fmtTs(grp.created_at)}
+          ${closed ? '· <span class="pill closed">종료</span>' : '· <span class="pill open">진행중</span>'}
+        </div>
+      </div>
+      <div class="grow"></div>
+      <div class="actions" style="margin:0">
+        ${closed ? "" : `<button id="closeGroup">그룹 종료</button>`}
+        <button id="writebackBtn" class="primary">Jira writeback</button>
+      </div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi"><div class="label">members</div><div class="num">${(grp.members||[]).length}</div></div>
+      <div class="kpi"><div class="label">tickets</div><div class="num">${(grp.tickets||[]).length}</div></div>
+      <div class="kpi"><div class="label">total time</div><div class="num">${fmtDur(totalSec)}</div></div>
+      <div class="kpi"><div class="label">total tokens</div><div class="num">${fmtTokens(totalTokens)}</div></div>
+    </div>
+
+    <div class="section">
+      <h2>티켓 (${(grp.tickets||[]).length})</h2>
+      <div class="card">
+      ${(grp.tickets||[]).length ? `<table>
+        <thead><tr><th>ticket</th><th class="num">sessions</th><th class="num">segments</th><th class="num">time</th><th>first</th><th>last</th></tr></thead>
+        <tbody>
+        ${(grp.tickets||[]).map(t => `
+          <tr>
+            <td class="mono"><strong>${escapeHtml(t.ticket_key)}</strong></td>
+            <td class="num">${t.sessions}</td>
+            <td class="num">${t.segments}</td>
+            <td class="num">${fmtDur(t.sec)}</td>
+            <td class="mono">${fmtTs(t.first_started)}</td>
+            <td class="mono">${fmtTs(t.last_ended)}</td>
+          </tr>`).join("")}
+        </tbody></table>` : `<div class="empty">아직 segment 없음. 워커들이 /tracker-ticket start KEY 또는 /tracker-group ticket KEY 실행 시 채워집니다.</div>`}
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>세션 (${(grp.members||[]).length})</h2>
+      <div class="card">
+      ${(grp.members||[]).length ? `<table>
+        <thead><tr><th>session</th><th>role</th><th>cwd</th><th>model</th><th class="num">events</th><th class="num">tokens</th><th>started</th></tr></thead>
+        <tbody>
+        ${(grp.members||[]).map(m => `
+          <tr>
+            <td class="mono"><a href="/browse?user=${encodeURIComponent(grp.owner_email)}&session=${encodeURIComponent(m.session_id)}&token=${encodeURIComponent(tok)}">${shortSid(m.session_id)}</a></td>
+            <td>${m.role ? `<span class="role-pill role-${escapeHtml(m.role)}">${escapeHtml(m.role)}</span>` : ""}</td>
+            <td class="mono" title="${escapeHtml(m.cwd||"")}">${escapeHtml((m.cwd||"").split("/").slice(-2).join("/") || "-")}</td>
+            <td class="mono">${escapeHtml(m.model || "-")}</td>
+            <td class="num">${m.events || 0}</td>
+            <td class="num">${fmtTokens(m.tokens)}</td>
+            <td class="mono">${fmtTs(m.started)}</td>
+          </tr>`).join("")}
+        </tbody></table>` : `<div class="empty">아직 attach된 세션 없음.</div>`}
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>writeback 코멘트 (${(grp.writeback_comments||[]).length})</h2>
+      <div class="card">
+      ${(grp.writeback_comments||[]).length ? `<table>
+        <thead><tr><th>ticket</th><th>jira_comment_id</th><th>posted_at</th></tr></thead>
+        <tbody>
+        ${(grp.writeback_comments||[]).map(c => `
+          <tr><td class="mono">${escapeHtml(c.ticket_key)}</td><td class="mono">${escapeHtml(c.jira_comment_id)}</td><td class="mono">${fmtTs(c.posted_at)}</td></tr>`).join("")}
+        </tbody></table>` : `<div class="empty">아직 writeback 안 됨.</div>`}
+      </div>
+    </div>
+  `;
+  document.getElementById("logout").onclick = () => { localStorage.removeItem(TOKEN_KEY); location.href = "/"; };
+  document.getElementById("writebackBtn").onclick = async () => {
+    const btn = document.getElementById("writebackBtn");
+    btn.disabled = true; btn.textContent = "writeback 중…";
+    try {
+      const r = await api(`/api/groups/${encodeURIComponent(gid())}/writeback`, { method: "POST" });
+      const ok = (r.results||[]).filter(x=>x.ok).length;
+      const fail = (r.results||[]).length - ok;
+      alert(`writeback 완료: ${ok}개 성공${fail?`, ${fail}개 실패`:""}`);
+      go();
+    } catch(e) { alert("실패: " + e.message); btn.disabled=false; btn.textContent="Jira writeback"; }
+  };
+  if (!closed) document.getElementById("closeGroup").onclick = async () => {
+    if (!confirm("그룹을 종료할까요? (이후 신규 attach 차단)")) return;
+    try { await api(`/api/groups/${encodeURIComponent(gid())}/close`, { method: "POST" }); go(); } catch(e){ alert("실패: "+e.message); }
+  };
+}
+
+async function go(){
+  const tok = getTok();
+  if (!tok) { location.href = "/"; return; }
+  const id = gid();
+  if (!id) { document.getElementById("main").innerHTML = '<div class="err">잘못된 URL</div>'; return; }
+  try {
+    const grp = await api("/api/groups/" + encodeURIComponent(id));
+    render(grp);
+  } catch(e) {
+    document.getElementById("main").innerHTML = `<div class="err">로드 실패: ${escapeHtml(e.message)}</div>`;
+  }
+}
+go();
+</script>
+</body>
+</html>

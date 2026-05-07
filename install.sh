@@ -55,6 +55,46 @@ echo "$ME" | grep -q '"email"' || { echo "❌ 토큰 검증 실패: $ME"; exit 1
 echo "$ME"
 echo
 
+bold "🎟  Jira 연결 (선택)"
+cat <<EOF
+세션을 Jira 티켓에 매칭하고, 작업 요약을 티켓 댓글로 자동 작성할 수 있습니다.
+나중에 Claude Code 안에서 /tracker-jira set ... 으로도 설정 가능합니다.
+건너뛰려면 그냥 Enter.
+EOF
+echo
+ask "Jira base URL (예: https://aptner.atlassian.net)" JIRA_URL ""
+if [ -n "$JIRA_URL" ]; then
+  ask "Jira 계정 email" JIRA_EMAIL "$EMAIL"
+  echo "Jira API 토큰 (https://id.atlassian.com/manage-profile/security/api-tokens):"
+  printf "  토큰: "
+  read -r -s JIRA_TOKEN
+  echo
+  if [ -n "$JIRA_TOKEN" ]; then
+    bold "🔎 Jira 자격증명 검증·저장 중..."
+    JIRA_BODY=$(node -e '
+      const [u,e,t] = process.argv.slice(1);
+      process.stdout.write(JSON.stringify({base_url:u, email:e, token:t}));
+    ' "$JIRA_URL" "$JIRA_EMAIL" "$JIRA_TOKEN")
+    JIRA_RESP=$(curl -s -X POST \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "$JIRA_BODY" \
+      "$TRACKER_BASE/api/integrations/jira")
+    if echo "$JIRA_RESP" | grep -q '"ok":true'; then
+      DISPLAY_NAME=$(echo "$JIRA_RESP" | sed -n 's/.*"displayName":"\([^"]*\)".*/\1/p')
+      PROJECTS=$(echo "$JIRA_RESP"   | sed -n 's/.*"projectsCount":\([0-9]*\).*/\1/p')
+      echo "✅ Jira 연결: ${DISPLAY_NAME:-?} · ${PROJECTS:-?} projects"
+      # Suppress the bootstrap nudge — user is already connected.
+      mkdir -p "$HOME/.claude" && date -u +%FT%TZ > "$HOME/.claude/.tracker-jira-nudged"
+    else
+      echo "❌ Jira 연결 실패: $JIRA_RESP"
+      echo "   Claude Code 안에서 다시 시도: /tracker-jira set --url=... --email=... --token=..."
+    fi
+    unset JIRA_TOKEN JIRA_BODY JIRA_RESP
+  fi
+fi
+echo
+
 bold "📦 Claude Code 플러그인 설치"
 cat <<EOF
 Claude Code 안에서 한 번만 실행:

@@ -180,6 +180,40 @@ function post(endpoint, token, body) {
   });
 }
 
+// post() 와 동일하지만 응답 JSON을 파싱해 반환 (실패 시 null). 추천/조회용.
+function postJson(endpoint, token, body, timeoutMs) {
+  return new Promise((resolve) => {
+    try {
+      const url = new URL(endpoint);
+      const lib = url.protocol === "https:" ? https : http;
+      const payload = Buffer.from(JSON.stringify(body));
+      const req = lib.request(
+        {
+          method: "POST",
+          hostname: url.hostname,
+          port: url.port || (url.protocol === "https:" ? 443 : 80),
+          path: url.pathname + (url.search || ""),
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": payload.length,
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          timeout: Math.max(500, timeoutMs || 4000),
+        },
+        (res) => {
+          let buf = "";
+          res.on("data", (c) => { buf += c.toString("utf8"); });
+          res.on("end", () => { try { resolve(JSON.parse(buf)); } catch { resolve(null); } });
+        }
+      );
+      req.on("error", () => resolve(null));
+      req.on("timeout", () => { req.destroy(); resolve(null); });
+      req.write(payload);
+      req.end();
+    } catch { resolve(null); }
+  });
+}
+
 function appendLocal(logDir, body) {
   try {
     fs.mkdirSync(logDir, { recursive: true });
@@ -230,6 +264,19 @@ function appendLocal(logDir, body) {
   const logDir = cfg.local_log_dir || path.join(os.homedir(), ".claude", "tracker-logs");
   appendLocal(logDir, body);
 
+  // Persist current session_id per-cwd for slash commands like /tracker-ticket.
+  // Key: cwd → session_id. Pick most-recent by mtime.
+  if (input.session_id) {
+    try {
+      const dir = path.join(os.homedir(), ".claude", "tracker-sessions");
+      fs.mkdirSync(dir, { recursive: true });
+      const safeKey = (input.cwd || process.cwd()).replace(/[^a-zA-Z0-9._-]/g, "_").slice(-100);
+      fs.writeFileSync(path.join(dir, safeKey), input.session_id);
+      // also write a "latest" pointer
+      fs.writeFileSync(path.join(dir, ".latest"), JSON.stringify({ session_id: input.session_id, cwd: input.cwd || process.cwd(), ts: Date.now() }));
+    } catch {}
+  }
+
   // Zero-config default: if the user never ran /tracker-config, still try to
   // reach a locally-running tracker server. Silently no-ops if nothing listens.
   const endpoint =
@@ -237,6 +284,87 @@ function appendLocal(logDir, body) {
     process.env.CLAUDE_TRACKER_ENDPOINT ||
     "http://localhost:3737/events";
   await post(endpoint, cfg.token || process.env.CLAUDE_TRACKER_TOKEN, body);
+
+  // ── session_start: CLAUDE_TRACKER_GROUP_ID 가 있으면 그룹에 자동 attach ──
+  if (EVENT === "session_start" && input.session_id && process.env.CLAUDE_TRACKER_GROUP_ID) {
+    try {
+      const base = endpoint.replace(/\/events\/?$/, "");
+      const gid = process.env.CLAUDE_TRACKER_GROUP_ID;
+      const role = process.env.CLAUDE_TRACKER_GROUP_ROLE || "worker";
+      await postJson(`${base}/api/groups/${encodeURIComponent(gid)}/attach`,
+        cfg.token || process.env.CLAUDE_TRACKER_TOKEN,
+        { session_id: input.session_id, role },
+        3000
+      );
+    } catch {}
+  }
+
+  // ── session_start: 브랜치/커밋 → 티켓 추천을 stderr로 안내 ──────────
+  if (EVENT === "session_start" && input.session_id) {
+    try {
+      const git = collectGitContext(input.cwd || body.cwd);
+      const base = endpoint.replace(/\/events\/?$/, "");
+      const recos = await postJson(`${base}/api/sessions/recommendations`,
+        cfg.token || process.env.CLAUDE_TRACKER_TOKEN,
+        {
+          session_id: input.session_id,
+          branch: git?.branch || null,
+          remote_url: git?.remote_url || null,
+          repo_root: git?.repo_root || null,
+          commits: (git?.commits || []).map((c) => c.msg).filter(Boolean).slice(0, 10),
+          cwd: input.cwd || body.cwd || null,
+        },
+        4000
+      );
+      // 1) 자동 그룹 합류 (ticket 감지보다 우선) — 같은 (user, repo)의 active 그룹에 자동 attach 됐다면 안내.
+      // 2) 그 외 브랜치/커밋에서 감지된 티켓 안내.
+      const lines = [];
+      if (recos?.auto_group) {
+        lines.push("");
+        lines.push("[claude-tracker] 자동 그룹 합류");
+        const ag = recos.auto_group;
+        const tag = ag.auto_attached ? "🆕 합류" : "▸ 기존 멤버";
+        lines.push(`  ${tag}: ${ag.name}  (${ag.id})`);
+        if (ag.active_ticket_key) {
+          lines.push(`  🎟  활성 티켓: ${ag.active_ticket_key}  ← 이 세션에 segment 자동 시작됨`);
+        }
+        lines.push(`  보기: ${endpoint.replace(/\/events\/?$/, "")}/g/${ag.id}`);
+        lines.push("");
+      }
+      if (recos && recos.detected?.length && !recos.auto_group?.active_ticket_key) {
+        lines.push("[claude-tracker] 티켓 추천");
+        if (git?.branch || git?.remote_url) {
+          const repo = (git.remote_url || "").replace(/^https?:\/\/[^/]+\//, "").replace(/\.git$/, "");
+          lines.push(`  📂 ${repo || "(remote 없음)"}  ·  브랜치: ${git.branch || "-"}`);
+        }
+        lines.push("  🎯 감지된 티켓:");
+        for (const d of recos.detected.slice(0, 5)) {
+          const star = d.in_assigned ? "★ " : "  ";
+          const status = d.status ? ` [${d.status}]` : "";
+          const summary = d.summary ? `  ${d.summary.slice(0, 60)}` : "";
+          lines.push(`    ${star}${d.key}${status}${summary}`);
+          lines.push(`        근거: ${d.evidence}`);
+        }
+        lines.push("");
+        lines.push(`  ▶ 시작: /tracker-ticket start ${recos.detected[0].key}`);
+        lines.push("");
+      }
+      if (lines.length) {
+        const banner = lines.join("\n");
+        // 1) LLM 컨텍스트로 주입 (Claude가 첫 응답 때 활용 가능)
+        process.stdout.write(JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: "SessionStart",
+            additionalContext: banner,
+          },
+        }) + "\n");
+        // 2) 사용자 터미널에 직접 노출 (stdout/stderr는 Claude Code가 capture하므로 /dev/tty로 우회)
+        try {
+          fs.writeFileSync("/dev/tty", banner + "\n");
+        } catch { /* /dev/tty 접근 불가 환경(SSH, daemon 등)은 silent */ }
+      }
+    } catch {}
+  }
 
   // Stop / SessionEnd 이벤트에서는 transcript 본문을 messages 테이블로도 동기화
   // (UNIQUE(session_id, seq) 덕에 INSERT OR REPLACE이라 중복 안전)
