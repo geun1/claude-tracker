@@ -17,6 +17,7 @@ import { Hono } from "hono";
 import { getActor, isAdmin, isManagerOrAbove, canSeeUser, canIssueRole, scopeFor, generateToken, hashToken, type Actor } from "./auth";
 import { encryptToken, decryptToken } from "./crypto";
 import { pingJira, fetchTicket, fetchAssignedOpen, fetchTicketContext, addComment, getTransitions, doTransition } from "./jira";
+import { runOptimize, aggregateModelStats, compareModels } from "./optimize";
 import { fetchConfluenceForTicket, createConfluencePage, addJiraRemoteLink, listConfluenceSpaces, deleteConfluencePage, removeJiraRemoteLinkByUrl, getPersonalSpaceKey, findTicketWikiPage, updateConfluencePageBody, ensureEpicPage } from "./confluence";
 import { maskString, maskJsonValue } from "./masking";
 import { costUsd } from "./pricing";
@@ -146,6 +147,12 @@ app.post("/events", async (c) => {
     ip, city, country, ua,
     off.inline, off.key
   ).run();
+
+  // Auto-scan session quality on session_end. Best-effort; runs after response
+  // sent via waitUntil. Idempotent (ON CONFLICT UPDATE) so re-scans are safe.
+  if (b.event === "session_end" && b.session_id) {
+    c.executionCtx.waitUntil(autoScanSession(c.env, b.session_id));
+  }
 
   // Claude Code의 /rename — hook이 transcript에서 customTitle 추출해 보내면 자동 동기화
   if (b.custom_title && b.session_id) {
@@ -1074,6 +1081,277 @@ ${assistantSnippet.slice(0, 1500)}
   return c.json({ ok: true, ...parsed, cost_usd: cost });
 });
 
+// ── Session quality scan (no LLM; pattern-only) ─────────────────────────
+// 위험 패턴(--no-verify, rm -rf, git --force 등) 카운트.
+// LLM을 안 쓰므로 비용 0, 모든 세션에 자동 적용 가능.
+// 추후 process/decision 품질은 별 엔드포인트에서 LLM-judge로 추가.
+
+const QUALITY_SCANNER_VERSION = 1;
+
+const RISK_PATTERNS: Record<string, RegExp> = {
+  // Hook/signing skip flags. Match standalone flag forms.
+  no_verify:      /(?:^|[\s"'`])(--no-verify|--no-gpg-sign|--no-edit)\b/g,
+  // git push/reset --force (with or without --force-with-lease — both noteworthy).
+  force:          /git\s+(?:push|reset)\s+[^\n;|&]*?(?:--force(?:-with-lease)?|\s-f\b)/gi,
+  // git reset --hard / git checkout . / git restore --source=HEAD .
+  reset_hard:     /git\s+(?:reset\s+--hard\b|checkout\s+\.\s|restore\s+(?:[^\n]*?)--source[= ]HEAD\s+\.)/gi,
+  // rm -rf / rm -fr (avoid matching --force-recurse or random "rfm").
+  destructive_rm: /(?:^|[\s"'`;&|])rm\s+-(?:r[fF]?|f[rR])\b/g,
+  // SQL: DROP TABLE/DATABASE/SCHEMA, TRUNCATE TABLE
+  drop_sql:       /\b(?:DROP\s+(?:TABLE|DATABASE|SCHEMA)|TRUNCATE\s+TABLE)\b/gi,
+};
+
+function countMatches(s: string, base: RegExp): number {
+  if (!s) return 0;
+  // Fresh RegExp per call so /g lastIndex doesn't leak across invocations.
+  const r = new RegExp(base.source, base.flags);
+  let n = 0;
+  while (r.exec(s)) { n++; if (n > 999) break; }
+  return n;
+}
+
+function firstSnippet(s: string, base: RegExp): string | null {
+  if (!s) return null;
+  const r = new RegExp(base.source, base.flags);
+  const m = r.exec(s);
+  if (!m) return null;
+  const start = Math.max(0, m.index - 30);
+  const end = Math.min(s.length, m.index + m[0].length + 60);
+  return s.slice(start, end).replace(/\s+/g, " ").trim();
+}
+
+type QualityResult = {
+  risk_no_verify: number;
+  risk_force: number;
+  risk_reset_hard: number;
+  risk_destructive_rm: number;
+  risk_drop_sql: number;
+  risk_total: number;
+  message_count: number;
+  bash_call_count: number;
+  tool_call_count: number;
+  evidence: { kind: string; seq: number; snippet: string }[];
+};
+
+function scanQualityForSession(
+  rows: { seq: number; tool_calls_json: string | null }[]
+): QualityResult {
+  let no_verify = 0, force = 0, reset_hard = 0, destructive_rm = 0, drop_sql = 0;
+  let bash_calls = 0, tool_calls = 0;
+  const evidence: { kind: string; seq: number; snippet: string }[] = [];
+
+  function addEvidenceIfRoom(kind: string, seq: number, blob: string, pat: RegExp) {
+    if (evidence.length >= 10) return;
+    const snip = firstSnippet(blob, pat);
+    if (snip) evidence.push({ kind, seq, snippet: snip });
+  }
+
+  for (const row of rows) {
+    if (!row.tool_calls_json) continue;
+    let calls: any[] = [];
+    try { calls = JSON.parse(row.tool_calls_json); } catch { continue; }
+    if (!Array.isArray(calls)) continue;
+    for (const call of calls) {
+      tool_calls++;
+      const input = call?.input ?? call?.params ?? {};
+      const blob = typeof input === "string" ? input : JSON.stringify(input);
+      if (call?.name === "Bash") bash_calls++;
+
+      const nv = countMatches(blob, RISK_PATTERNS.no_verify);
+      const fc = countMatches(blob, RISK_PATTERNS.force);
+      const rh = countMatches(blob, RISK_PATTERNS.reset_hard);
+      const dr = countMatches(blob, RISK_PATTERNS.destructive_rm);
+      const ds = countMatches(blob, RISK_PATTERNS.drop_sql);
+
+      if (nv) { no_verify += nv;       addEvidenceIfRoom("no_verify",      row.seq, blob, RISK_PATTERNS.no_verify); }
+      if (fc) { force += fc;           addEvidenceIfRoom("force",          row.seq, blob, RISK_PATTERNS.force); }
+      if (rh) { reset_hard += rh;      addEvidenceIfRoom("reset_hard",     row.seq, blob, RISK_PATTERNS.reset_hard); }
+      if (dr) { destructive_rm += dr;  addEvidenceIfRoom("destructive_rm", row.seq, blob, RISK_PATTERNS.destructive_rm); }
+      if (ds) { drop_sql += ds;        addEvidenceIfRoom("drop_sql",       row.seq, blob, RISK_PATTERNS.drop_sql); }
+    }
+  }
+
+  return {
+    risk_no_verify: no_verify,
+    risk_force: force,
+    risk_reset_hard: reset_hard,
+    risk_destructive_rm: destructive_rm,
+    risk_drop_sql: drop_sql,
+    risk_total: no_verify + force + reset_hard + destructive_rm + drop_sql,
+    message_count: rows.length,
+    bash_call_count: bash_calls,
+    tool_call_count: tool_calls,
+    evidence,
+  };
+}
+
+// Best-effort auto-scan triggered from /events on session_end. Optional delay
+// gives the trailing /messages/bulk POST(s) time to land before we scan.
+async function autoScanSession(env: Env, sid: string, delayMs = 5000) {
+  if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+  try {
+    const head: any = await env.DB.prepare(
+      "SELECT MAX(user_email) user_email, MAX(team) team FROM events WHERE session_id = ?"
+    ).bind(sid).first();
+    if (!head?.user_email) return;
+    const msgs = await env.DB.prepare(
+      "SELECT seq, tool_calls_json FROM messages WHERE session_id = ? AND tool_calls_json IS NOT NULL ORDER BY seq ASC"
+    ).bind(sid).all<any>();
+    const result = scanQualityForSession((msgs.results || []) as any[]);
+    await persistSessionQuality(env, sid, { user_email: head.user_email, team: head.team || null }, result);
+  } catch {
+    // best-effort; admin can re-scan via /api/admin/quality/scan-pending
+  }
+}
+
+async function persistSessionQuality(
+  env: Env,
+  sid: string,
+  meta: { user_email: string | null; team: string | null },
+  result: QualityResult
+) {
+  await env.DB.prepare(`
+    INSERT INTO session_quality (
+      session_id, user_email, team, scanned_at, scanner_version,
+      risk_no_verify, risk_force, risk_reset_hard, risk_destructive_rm, risk_drop_sql, risk_total,
+      message_count, bash_call_count, tool_call_count, evidence_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      user_email=excluded.user_email, team=excluded.team,
+      scanned_at=excluded.scanned_at, scanner_version=excluded.scanner_version,
+      risk_no_verify=excluded.risk_no_verify, risk_force=excluded.risk_force,
+      risk_reset_hard=excluded.risk_reset_hard, risk_destructive_rm=excluded.risk_destructive_rm,
+      risk_drop_sql=excluded.risk_drop_sql, risk_total=excluded.risk_total,
+      message_count=excluded.message_count, bash_call_count=excluded.bash_call_count,
+      tool_call_count=excluded.tool_call_count, evidence_json=excluded.evidence_json
+  `).bind(
+    sid, meta.user_email, meta.team, new Date().toISOString(), QUALITY_SCANNER_VERSION,
+    result.risk_no_verify, result.risk_force, result.risk_reset_hard, result.risk_destructive_rm, result.risk_drop_sql, result.risk_total,
+    result.message_count, result.bash_call_count, result.tool_call_count,
+    JSON.stringify(result.evidence)
+  ).run();
+}
+
+// Per-session: scan + persist + return result. Visible to anyone who can see the session.
+app.post("/api/sessions/:id/quality-scan", async (c) => {
+  const actor = c.get("actor");
+  const sid = c.req.param("id");
+  const head: any = await c.env.DB.prepare(
+    "SELECT MAX(user_email) user_email, MAX(team) team FROM events WHERE session_id = ?"
+  ).bind(sid).first();
+  if (!head?.user_email) return c.json({ error: "session not found" }, 404);
+  if (!canSeeUser(actor, head.user_email, head.team)) return c.json({ error: "forbidden" }, 403);
+
+  const msgs = await c.env.DB.prepare(
+    "SELECT seq, tool_calls_json FROM messages WHERE session_id = ? AND tool_calls_json IS NOT NULL ORDER BY seq ASC"
+  ).bind(sid).all<any>();
+  const result = scanQualityForSession((msgs.results || []) as any[]);
+  await persistSessionQuality(c.env, sid, { user_email: head.user_email, team: head.team || null }, result);
+  await audit(c.env, actor, "quality_scan_session", head.user_email, sid, c.req.header("cf-connecting-ip") || null);
+  return c.json({ ok: true, session_id: sid, scanner_version: QUALITY_SCANNER_VERSION, ...result });
+});
+
+// Read-only: pulls latest scan if present.
+app.get("/api/sessions/:id/quality", async (c) => {
+  const actor = c.get("actor");
+  const sid = c.req.param("id");
+  const row: any = await c.env.DB.prepare("SELECT * FROM session_quality WHERE session_id = ?").bind(sid).first();
+  if (!row) return c.json(null);
+  if (!canSeeUser(actor, row.user_email, row.team)) return c.json({ error: "forbidden" }, 403);
+  let evidence: any[] = [];
+  try { evidence = row.evidence_json ? JSON.parse(row.evidence_json) : []; } catch {}
+  return c.json({ ...row, evidence });
+});
+
+// Admin: bulk-scan unscanned (or out-of-version) sessions in window.
+app.post("/api/admin/quality/scan-pending", async (c) => {
+  const actor = c.get("actor");
+  if (!isAdmin(actor)) return c.json({ error: "forbidden" }, 403);
+  const days  = Math.max(1, Math.min(90,  Number(c.req.query("days")  || 7)));
+  const limit = Math.max(1, Math.min(200, Number(c.req.query("limit") || 100)));
+  const since = new Date(Date.now() - days * 86_400_000).toISOString();
+
+  const candidates = await c.env.DB.prepare(`
+    SELECT e.session_id, MAX(e.user_email) user_email, MAX(e.team) team
+    FROM events e
+    LEFT JOIN session_quality q ON q.session_id = e.session_id
+    WHERE e.ts >= ?
+      AND e.session_id IS NOT NULL
+      AND (q.session_id IS NULL OR q.scanner_version < ?)
+    GROUP BY e.session_id
+    ORDER BY MAX(e.ts) DESC
+    LIMIT ?
+  `).bind(since, QUALITY_SCANNER_VERSION, limit).all<any>();
+
+  const sessions = (candidates.results || []) as any[];
+  let scanned = 0, failed = 0, withRisk = 0;
+  for (const row of sessions) {
+    try {
+      const msgs = await c.env.DB.prepare(
+        "SELECT seq, tool_calls_json FROM messages WHERE session_id = ? AND tool_calls_json IS NOT NULL ORDER BY seq ASC"
+      ).bind(row.session_id).all<any>();
+      const result = scanQualityForSession((msgs.results || []) as any[]);
+      await persistSessionQuality(c.env, row.session_id, { user_email: row.user_email, team: row.team || null }, result);
+      scanned++;
+      if (result.risk_total > 0) withRisk++;
+    } catch {
+      failed++;
+    }
+  }
+  return c.json({ ok: true, scanned, failed, with_risk: withRisk, candidates: sessions.length, days, scanner_version: QUALITY_SCANNER_VERSION });
+});
+
+// Admin: aggregated risk summary (per-user roll-up + top-N risky sessions + totals).
+app.get("/api/admin/quality/risk-summary", async (c) => {
+  const actor = c.get("actor");
+  if (!isAdmin(actor)) return c.json({ error: "forbidden" }, 403);
+  const days  = Math.max(1, Math.min(90, Number(c.req.query("days") || 7)));
+  const since = new Date(Date.now() - days * 86_400_000).toISOString();
+
+  const byUser = await c.env.DB.prepare(`
+    SELECT user_email, team,
+           COUNT(*) AS sessions,
+           SUM(CASE WHEN risk_total > 0 THEN 1 ELSE 0 END) AS risky_sessions,
+           SUM(risk_no_verify)      AS no_verify,
+           SUM(risk_force)          AS force_,
+           SUM(risk_reset_hard)     AS reset_hard,
+           SUM(risk_destructive_rm) AS destructive_rm,
+           SUM(risk_drop_sql)       AS drop_sql,
+           SUM(risk_total)          AS risk_total
+    FROM session_quality
+    WHERE scanned_at >= ?
+    GROUP BY user_email, team
+    ORDER BY risk_total DESC, risky_sessions DESC
+    LIMIT 200
+  `).bind(since).all<any>();
+
+  const topSessions = await c.env.DB.prepare(`
+    SELECT session_id, user_email, team, risk_total,
+           risk_no_verify, risk_force, risk_reset_hard, risk_destructive_rm, risk_drop_sql,
+           scanned_at
+    FROM session_quality
+    WHERE scanned_at >= ? AND risk_total > 0
+    ORDER BY risk_total DESC, scanned_at DESC
+    LIMIT 50
+  `).bind(since).all<any>();
+
+  const totals: any = await c.env.DB.prepare(`
+    SELECT COUNT(*) AS sessions,
+           SUM(CASE WHEN risk_total > 0 THEN 1 ELSE 0 END) AS risky_sessions,
+           SUM(risk_total) AS risk_total
+    FROM session_quality
+    WHERE scanned_at >= ?
+  `).bind(since).first();
+
+  return c.json({
+    days, since,
+    scanner_version: QUALITY_SCANNER_VERSION,
+    totals: totals || { sessions: 0, risky_sessions: 0, risk_total: 0 },
+    by_user: byUser.results || [],
+    top_sessions: topSessions.results || [],
+  });
+});
+
 // 세션 ID만 알 때 owner email/team을 알아내기 위한 가벼운 메타 조회.
 // /browse 페이지가 ?session=만으로도 deep-link되도록 클라이언트가 이걸 호출.
 app.get("/api/sessions/:id/head", async (c) => {
@@ -1415,6 +1693,36 @@ app.get("/api/sessions/:id/segments", async (c) => {
     "SELECT id, ticket_key, started_at, ended_at, user_action, jira_comment_id FROM session_ticket_segments WHERE session_id = ? ORDER BY started_at ASC"
   ).bind(sid).all<any>();
   return c.json(r.results || []);
+});
+
+// ── Optimize / Compare: waste-pattern detection + per-model metrics ──
+// Port of getagentseal/codeburn server-side rules. Reads events + messages
+// directly, no client-side filesystem scan (Phase 1).
+app.get("/api/users/:email/optimize", async (c) => {
+  const actor = c.get("actor");
+  const email = decodeURIComponent(c.req.param("email"));
+  if (!canSeeUser(actor, email, null)) return c.json({ error: "forbidden" }, 403);
+  const days = Math.min(90, Math.max(1, parseInt(c.req.query("days") || "30", 10)));
+  const report = await runOptimize(c.env, email, days);
+  await audit(c.env, actor, "optimize", email, null, c.req.header("cf-connecting-ip") || null);
+  return c.json(report);
+});
+
+app.get("/api/users/:email/compare", async (c) => {
+  const actor = c.get("actor");
+  const email = decodeURIComponent(c.req.param("email"));
+  if (!canSeeUser(actor, email, null)) return c.json({ error: "forbidden" }, 403);
+  const days = Math.min(90, Math.max(1, parseInt(c.req.query("days") || "30", 10)));
+  const stats = await aggregateModelStats(c.env, email, days);
+  const modelA = c.req.query("modelA");
+  const modelB = c.req.query("modelB");
+  let comparison: any = null;
+  if (modelA && modelB) {
+    const a = stats.find(s => s.model === modelA || s.model.includes(modelA));
+    const b = stats.find(s => s.model === modelB || s.model.includes(modelB));
+    if (a && b) comparison = { a, b, rows: compareModels(a, b) };
+  }
+  return c.json({ days, user_email: email, models: stats, comparison });
 });
 
 // ── Groups: bundle multiple sessions (e.g. agent-team workers) into one task ──
