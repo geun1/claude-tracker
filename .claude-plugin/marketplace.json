@@ -10,7 +10,7 @@
     {
       "name": "claude-tracker",
       "description": "duse-ai-plugin: Claude Code session tracker with Jira/Confluence integration and ticket-aware workflow",
-      "version": "0.4.1",
+      "version": "0.4.2",
       "author": {
         "name": "Aptner AX",
         "email": "gsong@aptner.com"
@@ -27,5 +27,5 @@
       ]
     }
   ],
-  "version": "0.4.1"
+  "version": "0.4.2"
 }

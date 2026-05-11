@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "claude-tracker",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Claude Code session tracker with Jira/Confluence integration and ticket-aware workflow.",
   "author": {
     "name": "Aptner AX",
